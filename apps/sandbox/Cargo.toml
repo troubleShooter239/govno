@@ -7,6 +7,7 @@ publish.workspace = true
 default-run = "govno-sandbox"
 
 [dependencies]
+govno-assets = { path = "../../crates/assets" }
 glam.workspace = true
 govno-platform.workspace = true
 govno-render.workspace = true

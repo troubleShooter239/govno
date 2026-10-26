@@ -77,6 +77,11 @@ pub fn build(
     })?;
     let cube = renderer.upload_mesh(&cube())?;
     let sphere = renderer.upload_mesh(&sphere())?;
+    let white = renderer.upload_texture(&govno_render::TextureData {
+        width: 1,
+        height: 1,
+        rgba8: vec![255; 4],
+    })?;
     let mut instances = Vec::new();
     for row in 0..2 {
         for column in 0..5 {
@@ -88,6 +93,7 @@ pub fn build(
                     ..Default::default()
                 },
                 material: Material {
+                    base_color_texture: Some(white),
                     base_color: if row == 0 {
                         Vec3::new(0.12, 0.48, 0.8)
                     } else {
@@ -108,6 +114,7 @@ pub fn build(
             rotation: Quat::from_rotation_y(0.3),
         },
         material: Material {
+            base_color_texture: Some(white),
             base_color: Vec3::new(0.65, 0.12, 0.08),
             metallic: 0.1,
             roughness: 0.4,
@@ -122,6 +129,7 @@ pub fn build(
             ..Default::default()
         },
         material: Material {
+            base_color_texture: None,
             base_color: Vec3::splat(0.24),
             metallic: 0.0,
             roughness: 0.9,
@@ -136,6 +144,7 @@ pub fn build(
                 ..Default::default()
             },
             material: Material {
+                base_color_texture: None,
                 base_color: Vec3::new(0.1, 0.8, 0.2),
                 metallic: 0.0,
                 roughness: 0.4,

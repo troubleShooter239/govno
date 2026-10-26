@@ -96,6 +96,7 @@ fn main() -> Result<(), BoxError> {
         .try_init()?;
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
+    let mut gltf_path = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -109,11 +110,14 @@ fn main() -> Result<(), BoxError> {
                 }
                 options.frame_limit = Some(value);
             }
+            "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
             "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
-                println!("govno-sandbox [--frames N] [--smoke] [--validation|--no-validation]");
+                println!(
+                    "govno-sandbox [--gltf PATH] [--frames N] [--smoke] [--validation|--no-validation]"
+                );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
@@ -122,6 +126,7 @@ fn main() -> Result<(), BoxError> {
     if options.smoke && options.frame_limit.is_none_or(|n| n < 80) {
         return Err("--smoke requires --frames N with N >= 80".into());
     }
+    let imported = gltf_path.map(govno_assets::load_gltf).transpose()?;
     let smoke = options.smoke;
     let stats = Arc::new(ValidationStats::default());
     let callback_stats = stats.clone();
@@ -137,7 +142,27 @@ fn main() -> Result<(), BoxError> {
                 validation,
                 callback_stats,
             )?;
-            let (world, animated, temporary) = scene::build(&mut renderer, smoke)?;
+            let (mut world, animated, temporary) = scene::build(&mut renderer, smoke)?;
+            if let Some(primitives) = imported {
+                let white = renderer.upload_texture(&govno_render::TextureData {
+                    width: 1,
+                    height: 1,
+                    rgba8: vec![255; 4],
+                })?;
+                for primitive in primitives {
+                    let mesh = renderer.upload_mesh(&primitive.mesh)?;
+                    let mut material = primitive.material;
+                    material.base_color_texture = Some(match primitive.base_color_texture {
+                        Some(data) => renderer.upload_texture(&data)?,
+                        None => white,
+                    });
+                    world.instances.push(govno_render::DrawInstance {
+                        mesh,
+                        material,
+                        transform: Default::default(),
+                    });
+                }
+            }
             Ok(Box::new(GraphicsApp {
                 renderer,
                 world,

@@ -56,7 +56,7 @@ impl Frame {
         chain: &Swapchain,
         image_index: usize,
         frame_index: usize,
-        descriptor: vk::DescriptorSet,
+        scene: &crate::scene_gpu::SceneGpu,
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
     ) -> Result<(), BoxError> {
@@ -152,7 +152,7 @@ impl Frame {
                 vk::PipelineBindPoint::GRAPHICS,
                 chain.pipeline.layout,
                 0,
-                &[descriptor],
+                &[scene.descriptor(frame_index, None)?],
                 &[],
             );
             device.cmd_set_viewport(
@@ -176,6 +176,14 @@ impl Frame {
                 }],
             );
             for instance in &world.instances {
+                device.cmd_bind_descriptor_sets(
+                    self.command,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    chain.pipeline.layout,
+                    0,
+                    &[scene.descriptor(frame_index, instance.material.base_color_texture)?],
+                    &[],
+                );
                 let mesh = meshes
                     .get(&instance.mesh)
                     .ok_or("stale or foreign mesh handle")?;

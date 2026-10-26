@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/runtime", "apps/sandbox", "crates/platform", "crates/render", "crates/render-vulkan"]
+members = ["crates/assets", "crates/core", "crates/runtime", "apps/sandbox", "crates/platform", "crates/render", "crates/render-vulkan"]
 resolver = "3"
 
 [workspace.package]

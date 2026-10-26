@@ -1,0 +1,12 @@
+[package]
+name = "govno-assets"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+govno-core.workspace = true
+govno-render.workspace = true
+glam.workspace = true
+gltf = { version = "1.4", features = ["import", "utils"] }
+[lints]
+workspace = true

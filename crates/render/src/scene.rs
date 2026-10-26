@@ -88,6 +88,7 @@ impl Transform {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Material {
+    pub base_color_texture: Option<TextureHandle>,
     pub base_color: Vec3,
     pub metallic: f32,
     pub roughness: f32,
@@ -169,6 +170,7 @@ mod tests {
         );
         assert!(
             Material {
+                base_color_texture: None,
                 base_color: Vec3::ONE,
                 metallic: f32::NAN,
                 roughness: 0.5
@@ -196,5 +198,16 @@ mod tests {
             .transform_vector3(normal / (t.scale * t.scale))
             .normalize();
         assert!(actual.abs_diff_eq(expected, 1e-5));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureHandle {
+    owner: u64,
+    index: u64,
+}
+impl TextureHandle {
+    pub fn from_parts(owner: u64, index: u64) -> Self {
+        Self { owner, index }
     }
 }

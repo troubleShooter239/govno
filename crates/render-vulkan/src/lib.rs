@@ -90,6 +90,25 @@ impl VulkanRenderer {
         self.wait_idle()?;
         self.scene_gpu.set_texture(data)
     }
+    pub fn upload_texture(
+        &mut self,
+        data: &govno_render::TextureData,
+    ) -> Result<govno_render::TextureHandle, BoxError> {
+        if self.failed {
+            return Err("renderer has failed".into());
+        }
+        let handle = govno_render::TextureHandle::from_parts(self.renderer_id, self.next_mesh);
+        self.next_mesh = self
+            .next_mesh
+            .checked_add(1)
+            .ok_or("resource ID exhausted")?;
+        self.scene_gpu.upload_texture(handle, data)?;
+        Ok(handle)
+    }
+    pub fn remove_texture(&mut self, handle: govno_render::TextureHandle) -> Result<(), BoxError> {
+        self.wait_idle()?;
+        self.scene_gpu.remove_texture(handle)
+    }
     pub fn upload_mesh(&mut self, data: &MeshData) -> Result<MeshHandle, BoxError> {
         if self.failed {
             return Err("renderer has failed".into());
@@ -148,6 +167,10 @@ impl VulkanRenderer {
             return Ok(FrameStatus::Skipped);
         }
         world.validate(self.extent)?;
+        for item in &world.instances {
+            self.scene_gpu
+                .descriptor(self.frame_index, item.material.base_color_texture)?;
+        }
         if world
             .instances
             .iter()
@@ -221,7 +244,7 @@ impl VulkanRenderer {
                 chain,
                 i,
                 self.frame_index,
-                self.scene_gpu.sets[self.frame_index],
+                &self.scene_gpu,
                 world,
                 &self.meshes,
             )?;

@@ -2,7 +2,9 @@
 mod camera;
 mod scene;
 pub use camera::Camera;
-pub use scene::{DrawInstance, Material, MeshData, MeshHandle, RenderWorld, Transform, Vertex};
+pub use scene::{
+    DrawInstance, Material, MeshData, MeshHandle, RenderWorld, TextureHandle, Transform, Vertex,
+};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderExtent {
     pub width: u32,

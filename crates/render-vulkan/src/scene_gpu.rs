@@ -18,6 +18,7 @@ pub(crate) struct SceneGpu {
     cameras: Vec<Buffer>,
     texture: Option<crate::texture::Texture>,
     memory: Rc<Memory>,
+    textures: std::collections::HashMap<govno_render::TextureHandle, TextureSlot>,
 }
 impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
@@ -29,6 +30,7 @@ impl SceneGpu {
             cameras: Vec::new(),
             texture: None,
             memory: memory.clone(),
+            textures: Default::default(),
         };
         for _ in 0..frames {
             owner.cameras.push(Buffer::new(
@@ -193,6 +195,115 @@ pub(crate) fn draw_constants(instance: &DrawInstance) -> Vec<u8> {
 fn floats(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
+
+struct TextureSlot {
+    ctx: Arc<DeviceContext>,
+    pool: vk::DescriptorPool,
+    sets: Vec<vk::DescriptorSet>,
+    _texture: crate::texture::Texture,
+}
+impl Drop for TextureSlot {
+    fn drop(&mut self) {
+        // SAFETY: renderer waits for users before removing slots or shutting down.
+        unsafe {
+            self.ctx.device.destroy_descriptor_pool(self.pool, None);
+        }
+    }
+}
+impl SceneGpu {
+    pub fn upload_texture(
+        &mut self,
+        handle: govno_render::TextureHandle,
+        data: &govno_render::TextureData,
+    ) -> Result<(), BoxError> {
+        let texture = crate::texture::Texture::new(self.memory.clone(), data)?;
+        let frames = self.cameras.len() as u32;
+        let mut slot = TextureSlot {
+            ctx: self.ctx.clone(),
+            pool: vk::DescriptorPool::null(),
+            sets: Vec::new(),
+            _texture: texture,
+        };
+        // SAFETY: new descriptor sets have no GPU users; retained cameras/textures
+        // outlive the slot. Partial allocation is owned by its pool.
+        unsafe {
+            let sizes = [
+                vk::DescriptorType::UNIFORM_BUFFER,
+                vk::DescriptorType::SAMPLED_IMAGE,
+                vk::DescriptorType::SAMPLER,
+            ]
+            .map(|ty| {
+                vk::DescriptorPoolSize::default()
+                    .ty(ty)
+                    .descriptor_count(frames)
+            });
+            slot.pool = self.ctx.device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(frames)
+                    .pool_sizes(&sizes),
+                None,
+            )?;
+            let layouts = vec![self.layout; frames as usize];
+            slot.sets = self.ctx.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(slot.pool)
+                    .set_layouts(&layouts),
+            )?;
+            for (set, camera) in slot.sets.iter().zip(&self.cameras) {
+                let buffer = [vk::DescriptorBufferInfo::default()
+                    .buffer(camera.handle)
+                    .range(CAMERA_BYTES)];
+                let image = [vk::DescriptorImageInfo::default()
+                    .image_view(slot._texture.image.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                let sampler = [vk::DescriptorImageInfo::default().sampler(slot._texture.sampler)];
+                self.ctx.device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(&buffer),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(&image),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(&sampler),
+                    ],
+                    &[],
+                );
+            }
+        }
+        self.textures.insert(handle, slot);
+        Ok(())
+    }
+    pub fn descriptor(
+        &self,
+        frame: usize,
+        texture: Option<govno_render::TextureHandle>,
+    ) -> Result<vk::DescriptorSet, BoxError> {
+        match texture {
+            None => Ok(self.sets[frame]),
+            Some(handle) => Ok(self
+                .textures
+                .get(&handle)
+                .ok_or("unknown or foreign texture handle")?
+                .sets[frame]),
+        }
+    }
+    pub fn remove_texture(&mut self, handle: govno_render::TextureHandle) -> Result<(), BoxError> {
+        self.textures
+            .remove(&handle)
+            .ok_or("unknown or removed texture handle")?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +318,7 @@ mod tests {
                 ..Default::default()
             },
             material: Material {
+                base_color_texture: None,
                 base_color: Vec3::ONE,
                 metallic: 0.7,
                 roughness: 0.4,
