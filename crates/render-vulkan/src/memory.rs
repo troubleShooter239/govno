@@ -168,6 +168,15 @@ impl ImageResource {
             depth_range(),
         )
     }
+    pub fn hdr(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
+        Self::with_usage(
+            memory,
+            extent,
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            crate::swapchain::color_range(),
+        )
+    }
     pub fn sampled(
         memory: Rc<Memory>,
         extent: vk::Extent2D,

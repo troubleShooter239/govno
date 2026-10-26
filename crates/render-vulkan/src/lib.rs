@@ -4,6 +4,7 @@ mod frame;
 mod memory;
 mod mesh;
 mod pipeline;
+mod post;
 mod scene_gpu;
 mod swapchain;
 mod texture;

@@ -63,6 +63,7 @@ impl Frame {
         let device = &self.ctx.device;
         let image = chain.images[image_index];
         let depth = &chain.depth[frame_index];
+        let hdr = &chain.post.targets[frame_index];
         let extent = chain.extent;
         // SAFETY: frame fence has completed, so its command pool, uniform and depth
         // target are no longer in flight. Meshes are validated and retained through
@@ -83,7 +84,7 @@ impl Frame {
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
+                    .image(hdr.image)
                     .subresource_range(color_range()),
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(
@@ -111,7 +112,7 @@ impl Frame {
                 &vk::DependencyInfo::default().image_memory_barriers(&barriers),
             );
             let colors = [vk::RenderingAttachmentInfo::default()
-                .image_view(chain.views[image_index])
+                .image_view(hdr.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
@@ -195,6 +196,72 @@ impl Frame {
                 );
                 device.cmd_draw_indexed(self.command, mesh.index_count, 1, 0, 0, 0);
             }
+            device.cmd_end_rendering(self.command);
+            let ready = [
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(hdr.image)
+                    .subresource_range(color_range())
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image(image)
+                    .subresource_range(color_range())
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
+            ];
+            device.cmd_pipeline_barrier2(
+                self.command,
+                &vk::DependencyInfo::default().image_memory_barriers(&ready),
+            );
+            let output = [vk::RenderingAttachmentInfo::default()
+                .image_view(chain.views[image_index])
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE)];
+            device.cmd_begin_rendering(
+                self.command,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: Default::default(),
+                        extent,
+                    })
+                    .layer_count(1)
+                    .color_attachments(&output),
+            );
+            let post = chain
+                .post
+                .pipeline
+                .as_ref()
+                .ok_or("post pipeline not initialized")?;
+            device.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::GRAPHICS, post.pipeline);
+            device.cmd_bind_descriptor_sets(
+                self.command,
+                vk::PipelineBindPoint::GRAPHICS,
+                post.layout,
+                0,
+                &[chain.post.sets[frame_index]],
+                &[],
+            );
+            let output = crate::post::output_constants(world.post_process, chain.srgb_attachment);
+            device.cmd_push_constants(
+                self.command,
+                post.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                &output,
+            );
+            device.cmd_draw(self.command, 3, 1, 0, 0);
             device.cmd_end_rendering(self.command);
             let to_present = [vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)

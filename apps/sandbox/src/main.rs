@@ -78,6 +78,31 @@ impl WindowDriver for GraphicsApp {
                 })?;
             tracing::info!("smoke: texture replaced after submitted frames");
         }
+        if self.smoke {
+            if self.frames == 75 {
+                let saved = self.world.post_process;
+                self.world.post_process.exposure_ev = f32::NAN;
+                let rejected = self.renderer.draw(&self.world).is_err();
+                self.world.post_process = saved;
+                if !rejected {
+                    return Err("smoke: invalid exposure was accepted".into());
+                }
+                tracing::info!("smoke: invalid exposure rejected; renderer remains usable");
+            }
+            if let Some(offset) = match self.frames {
+                15 => Some(-1.0),
+                35 => Some(2.0),
+                75 => Some(-1.0),
+                _ => None,
+            } {
+                self.world.post_process.exposure_ev =
+                    (self.world.post_process.exposure_ev + offset).clamp(-16.0, 16.0);
+                tracing::info!(
+                    exposure_ev = self.world.post_process.exposure_ev,
+                    "smoke: exposure updated"
+                );
+            }
+        }
         let presented = self.renderer.draw(&self.world)? == FrameStatus::Presented;
         if presented {
             self.frames += 1;
@@ -98,6 +123,7 @@ fn main() -> Result<(), BoxError> {
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
+    let mut post_process = govno_render::PostProcessSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -111,13 +137,20 @@ fn main() -> Result<(), BoxError> {
                 }
                 options.frame_limit = Some(value);
             }
+            "--exposure" => {
+                post_process.exposure_ev = args
+                    .next()
+                    .ok_or("--exposure requires an EV value")?
+                    .parse()?;
+                post_process.validate()?;
+            }
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
             "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--frames N] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--exposure EV] [--frames N] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -183,6 +216,8 @@ fn main() -> Result<(), BoxError> {
                     });
                 }
             }
+            world.post_process = post_process;
+            tracing::info!(exposure_ev = post_process.exposure_ev, "scene exposure");
             Ok(Box::new(GraphicsApp {
                 renderer,
                 world,

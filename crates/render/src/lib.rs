@@ -1,7 +1,9 @@
 //! Renderer-facing CPU data. No Vulkan, window, or ECS dependencies.
 mod camera;
+mod post;
 mod scene;
 pub use camera::Camera;
+pub use post::PostProcessSettings;
 pub use scene::{
     DrawInstance, Material, MeshData, MeshHandle, RenderWorld, TextureHandle, Transform, Vertex,
 };

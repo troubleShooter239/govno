@@ -3,7 +3,7 @@ struct FrameData
     column_major float4x4 viewProjection;
     float4 cameraPosition;
     float4 lightDirection;
-    float4 lightRadiance; // w = manually encode sRGB for UNORM swapchains
+    float4 lightRadiance; // rgb is linear radiance; w reserved
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
@@ -59,13 +59,6 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
-float3 encodeSRGB(float3 color)
-{
-    return float3(
-        color.x <= 0.0031308 ? 12.92 * color.x : 1.055 * pow(color.x, 1.0/2.4) - 0.055,
-        color.y <= 0.0031308 ? 12.92 * color.y : 1.055 * pow(color.y, 1.0/2.4) - 0.055,
-        color.z <= 0.0031308 ? 12.92 * color.z : 1.055 * pow(color.z, 1.0/2.4) - 0.055);
-}
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target0
 {
@@ -125,7 +118,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
     color += base * 0.025 * (1.0-metal) * ao;
     color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;
-    color = color / (1.0 + color); // Reinhard display mapping
-    if (frame.lightRadiance.w > 0.5) color = encodeSRGB(color);
+
+
     return float4(color, 1.0);
 }

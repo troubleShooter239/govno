@@ -138,6 +138,7 @@ pub struct DrawInstance {
     pub material: Material,
 }
 pub struct RenderWorld {
+    pub post_process: crate::PostProcessSettings,
     pub camera: Camera,
     /// Direction from a surface toward the light, not the direction of propagation.
     pub light_direction: Vec3,
@@ -146,6 +147,7 @@ pub struct RenderWorld {
 }
 impl RenderWorld {
     pub fn validate(&self, extent: RenderExtent) -> Result<(), BoxError> {
+        self.post_process.validate()?;
         self.camera.view_projection(extent)?;
         if !self.light_direction.is_finite()
             || self.light_direction.length_squared() < 1e-8

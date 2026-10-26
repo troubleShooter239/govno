@@ -44,6 +44,7 @@ pub(crate) struct Swapchain {
     pub present_fences: Vec<vk::Fence>,
     pub pending_present: Vec<bool>,
     pub pipeline: ForwardPipeline,
+    pub post: crate::post::PostProcess,
     pub depth: Vec<crate::memory::ImageResource>,
     pub srgb_attachment: bool,
 }
@@ -85,8 +86,13 @@ impl Swapchain {
             .present_mode(vk::PresentModeKHR::FIFO)
             .clipped(true)
             .old_swapchain(old);
-        let pipeline =
-            ForwardPipeline::new(ctx.clone(), format.format, depth_format, scene_layout)?;
+        let pipeline = ForwardPipeline::new(
+            ctx.clone(),
+            crate::post::HDR_FORMAT,
+            depth_format,
+            scene_layout,
+        )?;
+        let post = crate::post::PostProcess::new(memory.clone(), extent, format.format)?;
         // SAFETY: device/surface are live, the caller quiesces the old swapchain.
         // Each child handle is recorded in its RAII owner immediately after creation.
         unsafe {
@@ -101,6 +107,7 @@ impl Swapchain {
                 present_fences: Vec::new(),
                 pending_present: Vec::new(),
                 pipeline,
+                post,
                 depth: Vec::new(),
                 srgb_attachment: matches!(
                     format.format,

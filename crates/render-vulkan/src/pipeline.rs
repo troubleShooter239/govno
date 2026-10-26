@@ -39,9 +39,38 @@ impl ForwardPipeline {
         depth_format: vk::Format,
         scene_layout: vk::DescriptorSetLayout,
     ) -> Result<Self, BoxError> {
-        let vertex = ShaderModule::new(ctx.clone(), include_bytes!("../shaders/vertexMain.spv"))?;
-        let fragment =
-            ShaderModule::new(ctx.clone(), include_bytes!("../shaders/fragmentMain.spv"))?;
+        Self::build(ctx, format, depth_format, scene_layout, false)
+    }
+    pub fn post(
+        ctx: Arc<DeviceContext>,
+        format: vk::Format,
+        layout: vk::DescriptorSetLayout,
+    ) -> Result<Self, BoxError> {
+        Self::build(ctx, format, vk::Format::UNDEFINED, layout, true)
+    }
+    fn build(
+        ctx: Arc<DeviceContext>,
+        format: vk::Format,
+        depth_format: vk::Format,
+        scene_layout: vk::DescriptorSetLayout,
+        post: bool,
+    ) -> Result<Self, BoxError> {
+        let vertex = ShaderModule::new(
+            ctx.clone(),
+            if post {
+                include_bytes!("../shaders/postVertex.spv")
+            } else {
+                include_bytes!("../shaders/vertexMain.spv")
+            },
+        )?;
+        let fragment = ShaderModule::new(
+            ctx.clone(),
+            if post {
+                include_bytes!("../shaders/postFragment.spv")
+            } else {
+                include_bytes!("../shaders/fragmentMain.spv")
+            },
+        )?;
         let mut owner = Self {
             ctx,
             pipeline: vk::Pipeline::null(),
@@ -51,11 +80,15 @@ impl ForwardPipeline {
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(vertex.handle)
-                .name(c"vertexMain"),
+                .name(if post { c"postVertex" } else { c"vertexMain" }),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fragment.handle)
-                .name(c"fragmentMain"),
+                .name(if post {
+                    c"postFragment"
+                } else {
+                    c"fragmentMain"
+                }),
         ];
         let bindings = [vk::VertexInputBindingDescription {
             binding: 0,
@@ -88,12 +121,15 @@ impl ForwardPipeline {
                 offset: 12,
             },
         ];
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        let mut vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&bindings)
             .vertex_attribute_descriptions(&attributes);
+        if post {
+            vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        }
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
+            .depth_test_enable(!post)
+            .depth_write_enable(!post)
             .depth_compare_op(vk::CompareOp::GREATER);
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -116,16 +152,25 @@ impl ForwardPipeline {
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats)
             .depth_attachment_format(depth_format);
+        let layouts = if post {
+            vec![scene_layout]
+        } else {
+            vec![scene_layout; 4]
+        };
         // SAFETY: all borrowed create-info arrays/modules are live for this call.
         // Descriptor layout and push constant ranges match the compiled shader interfaces.
         unsafe {
             owner.layout = owner.ctx.device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[scene_layout; 4])
+                    .set_layouts(&layouts)
                     .push_constant_ranges(&[vk::PushConstantRange::default()
                         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                         .offset(0)
-                        .size(crate::scene_gpu::DRAW_BYTES)]),
+                        .size(if post {
+                            crate::post::OUTPUT_BYTES
+                        } else {
+                            crate::scene_gpu::DRAW_BYTES
+                        })]),
                 None,
             )?;
             let info = vk::GraphicsPipelineCreateInfo::default()
