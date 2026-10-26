@@ -3,6 +3,12 @@ use ash::vk;
 use govno_core::BoxError;
 use std::{io::Cursor, sync::Arc};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Forward,
+    Post,
+    Shadow,
+}
 pub(crate) struct ForwardPipeline {
     ctx: Arc<DeviceContext>,
     pub pipeline: vk::Pipeline,
@@ -39,26 +45,39 @@ impl ForwardPipeline {
         depth_format: vk::Format,
         scene_layout: vk::DescriptorSetLayout,
     ) -> Result<Self, BoxError> {
-        Self::build(ctx, format, depth_format, scene_layout, false)
+        Self::build(ctx, format, depth_format, scene_layout, Pass::Forward)
     }
     pub fn post(
         ctx: Arc<DeviceContext>,
         format: vk::Format,
         layout: vk::DescriptorSetLayout,
     ) -> Result<Self, BoxError> {
-        Self::build(ctx, format, vk::Format::UNDEFINED, layout, true)
+        Self::build(ctx, format, vk::Format::UNDEFINED, layout, Pass::Post)
+    }
+    pub fn shadow(ctx: Arc<DeviceContext>) -> Result<Self, BoxError> {
+        Self::build(
+            ctx,
+            vk::Format::UNDEFINED,
+            vk::Format::D32_SFLOAT,
+            vk::DescriptorSetLayout::null(),
+            Pass::Shadow,
+        )
     }
     fn build(
         ctx: Arc<DeviceContext>,
         format: vk::Format,
         depth_format: vk::Format,
         scene_layout: vk::DescriptorSetLayout,
-        post: bool,
+        pass: Pass,
     ) -> Result<Self, BoxError> {
+        let post = pass == Pass::Post;
+        let shadow = pass == Pass::Shadow;
         let vertex = ShaderModule::new(
             ctx.clone(),
             if post {
                 include_bytes!("../shaders/postVertex.spv")
+            } else if shadow {
+                include_bytes!("../shaders/shadowVertex.spv")
             } else {
                 include_bytes!("../shaders/vertexMain.spv")
             },
@@ -76,11 +95,17 @@ impl ForwardPipeline {
             pipeline: vk::Pipeline::null(),
             layout: vk::PipelineLayout::null(),
         };
-        let stages = [
+        let mut stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(vertex.handle)
-                .name(if post { c"postVertex" } else { c"vertexMain" }),
+                .name(if post {
+                    c"postVertex"
+                } else if shadow {
+                    c"shadowVertex"
+                } else {
+                    c"vertexMain"
+                }),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fragment.handle)
@@ -90,6 +115,9 @@ impl ForwardPipeline {
                     c"fragmentMain"
                 }),
         ];
+        if shadow {
+            stages.truncate(1);
+        }
         let bindings = [vk::VertexInputBindingDescription {
             binding: 0,
             stride: 48,
@@ -127,10 +155,17 @@ impl ForwardPipeline {
         if post {
             vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         }
+        if shadow {
+            vertex_input = vertex_input.vertex_attribute_descriptions(&attributes[2..3]);
+        }
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(!post)
             .depth_write_enable(!post)
-            .depth_compare_op(vk::CompareOp::GREATER);
+            .depth_compare_op(if shadow {
+                vk::CompareOp::LESS
+            } else {
+                vk::CompareOp::GREATER
+            });
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewport = vk::PipelineViewportStateCreateInfo::default()
@@ -140,19 +175,28 @@ impl ForwardPipeline {
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .line_width(1.0);
+            .line_width(1.0)
+            .depth_bias_enable(shadow)
+            .depth_bias_constant_factor(1.25)
+            .depth_bias_slope_factor(1.75);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let attachments = [vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+        let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(if shadow {
+            &[]
+        } else {
+            &attachments
+        });
         let states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&states);
         let formats = [format];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&formats)
+            .color_attachment_formats(if shadow { &[] } else { &formats })
             .depth_attachment_format(depth_format);
-        let layouts = if post {
+        let layouts = if shadow {
+            vec![]
+        } else if post {
             vec![scene_layout]
         } else {
             vec![scene_layout; 4]
@@ -168,6 +212,8 @@ impl ForwardPipeline {
                         .offset(0)
                         .size(if post {
                             crate::post::OUTPUT_BYTES
+                        } else if shadow {
+                            64
                         } else {
                             crate::scene_gpu::DRAW_BYTES
                         })]),

@@ -215,6 +215,7 @@ pub fn build(
     };
     let world = RenderWorld {
         post_process: Default::default(),
+        directional_shadow: Some(Default::default()),
         camera: Camera {
             position: Vec3::new(0.0, 3.3, 10.0),
             pitch: -0.23,

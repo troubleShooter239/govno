@@ -17,6 +17,7 @@ struct GraphicsApp {
     animated: usize,
     temporary: Option<MeshHandle>,
     smoke: bool,
+    shadows: bool,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -77,6 +78,16 @@ impl WindowDriver for GraphicsApp {
                     ],
                 })?;
             tracing::info!("smoke: texture replaced after submitted frames");
+        }
+        if self.smoke && self.shadows {
+            if self.frames == 22 {
+                self.world.directional_shadow = None;
+                tracing::info!("smoke: shadows disabled");
+            }
+            if self.frames == 25 {
+                self.world.directional_shadow = Some(Default::default());
+                tracing::info!("smoke: shadows enabled");
+            }
         }
         if self.smoke && self.frames == 45 {
             self.world.point_lights[0].position.x = -1.5;
@@ -155,6 +166,7 @@ fn main() -> Result<(), BoxError> {
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
+    let mut shadows = true;
     let mut post_process = govno_render::PostProcessSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -177,12 +189,13 @@ fn main() -> Result<(), BoxError> {
                 post_process.validate()?;
             }
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
+            "--no-shadows" => shadows = false,
             "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--exposure EV] [--frames N] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--frames N] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -249,6 +262,9 @@ fn main() -> Result<(), BoxError> {
                 }
             }
             world.post_process = post_process;
+            if !shadows {
+                world.directional_shadow = None;
+            }
             tracing::info!(exposure_ev = post_process.exposure_ev, "scene exposure");
             Ok(Box::new(GraphicsApp {
                 renderer,
@@ -260,6 +276,7 @@ fn main() -> Result<(), BoxError> {
                 animated,
                 temporary,
                 smoke,
+                shadows,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");

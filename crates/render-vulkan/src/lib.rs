@@ -6,6 +6,7 @@ mod mesh;
 mod pipeline;
 mod post;
 mod scene_gpu;
+mod shadow;
 mod swapchain;
 mod texture;
 use ash::vk;

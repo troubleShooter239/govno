@@ -41,6 +41,7 @@ mod tests {
         for ev in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -16.01, 16.01] {
             let world = crate::RenderWorld {
                 post_process: PostProcessSettings { exposure_ev: ev },
+                directional_shadow: None,
                 camera: Default::default(),
                 light_direction: glam::Vec3::Y,
                 light_radiance: glam::Vec3::ONE,

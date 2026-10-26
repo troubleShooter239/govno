@@ -4,11 +4,13 @@ mod light;
 pub use light::{MAX_POINT_LIGHTS, PointLight};
 mod post;
 mod scene;
+mod shadow;
 pub use camera::Camera;
 pub use post::PostProcessSettings;
 pub use scene::{
     DrawInstance, Material, MeshData, MeshHandle, RenderWorld, TextureHandle, Transform, Vertex,
 };
+pub use shadow::DirectionalShadow;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderExtent {
     pub width: u32,

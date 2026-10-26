@@ -168,6 +168,15 @@ impl ImageResource {
             depth_range(),
         )
     }
+    pub fn shadow(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
+        Self::with_usage(
+            memory,
+            extent,
+            vk::Format::D32_SFLOAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            depth_range(),
+        )
+    }
     pub fn hdr(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
         Self::with_usage(
             memory,

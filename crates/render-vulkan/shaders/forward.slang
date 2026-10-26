@@ -6,9 +6,12 @@ struct FrameData
     float4 lightDirection;
     float4 lightRadiance; // rgb directional radiance; w point light count
     PointLightData pointLights[16];
+    column_major float4x4 shadowViewProjection;
+    float4 shadowParams; // x receiver bias, y enabled
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
+[[vk::binding(5, 0)]] Texture2D<float> shadowMap;
 [[vk::binding(1, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(2, 0)]] SamplerState baseColorSampler;
 
@@ -61,6 +64,23 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
+float directionalVisibility(float3 position)
+{
+    if (frame.shadowParams.y < 0.5) return 1.0;
+    float3 projected = mul(frame.shadowViewProjection,float4(position,1.0)).xyz;
+    float2 uv = projected.xy * 0.5 + 0.5;
+    if (any(uv < 0.0) || any(uv >= 1.0) || projected.z < 0.0 || projected.z > 1.0) return 1.0;
+    uint width, height;
+    shadowMap.GetDimensions(width,height);
+    int2 size = int2(width,height);
+    int2 pixel = int2(uv * float2(size));
+    float visible = 0.0;
+    for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        float depth = shadowMap.Load(int3(clamp(pixel+int2(x,y),int2(0),size-1),0));
+        visible += projected.z - frame.shadowParams.x <= depth ? 1.0 : 0.0;
+    }
+    return visible / 9.0;
+}
 float3 directLight(float3 n, float3 v, float3 l, float3 base, float metal, float roughness, float3 radiance)
 {
     const float PI = 3.14159265359;
@@ -118,7 +138,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float2 mr = metalRoughTexture.Sample(metalRoughSampler,input.uv).gb;
     float metal = saturate(draw.baseColorMetallic.w * mr.y);
     float roughness = clamp(draw.inverseScaleSquaredRoughness.w * mr.x,0.045,1.0);
-    float3 color = directLight(n,v,l,base,metal,roughness,frame.lightRadiance.xyz);
+    float3 color = directLight(n,v,l,base,metal,roughness,frame.lightRadiance.xyz) * directionalVisibility(input.worldPosition);
     for (uint i = 0; i < uint(frame.lightRadiance.w); ++i) {
         PointLightData light = frame.pointLights[i];
         float3 delta = light.positionRange.xyz - input.worldPosition;
@@ -130,7 +150,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
         float attenuation = window * window / max(distanceSquared,0.01);
         color += directLight(n,v,safeNormalize(delta),base,metal,roughness,light.intensity.rgb * attenuation);
     }
-    // Temporary ambient fill; no IBL or shadows yet.
+    // Temporary ambient fill; no IBL. Directional shadows affect direct light only.
     float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
     color += base * 0.025 * (1.0-metal) * ao;
     color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;

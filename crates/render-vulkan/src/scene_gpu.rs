@@ -8,9 +8,10 @@ use govno_render::{DrawInstance, RenderExtent, RenderWorld};
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
-pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64;
+pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80;
 pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
+    pub shadow: crate::shadow::ShadowMap,
     ctx: Arc<DeviceContext>,
     pub layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -30,6 +31,7 @@ pub(crate) struct SceneGpu {
 impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
         let mut owner = Self {
+            shadow: crate::shadow::ShadowMap::new(memory.clone())?,
             ctx: memory.ctx.clone(),
             layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
@@ -49,6 +51,11 @@ impl SceneGpu {
             )?);
         }
         let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
@@ -88,7 +95,7 @@ impl SceneGpu {
                     .descriptor_count(frames),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(frames * 2),
+                    .descriptor_count(frames * 3),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLER)
                     .descriptor_count(frames * 2),
@@ -119,6 +126,7 @@ impl SceneGpu {
                 );
             }
         }
+        owner.shadow.bind_images(&owner.sets);
         owner.set_texture(&govno_render::TextureData {
             color_space: Default::default(),
             width: 1,
@@ -283,6 +291,8 @@ impl SceneGpu {
                 vk::DescriptorPoolSize::default().ty(ty).descriptor_count(
                     if ty == vk::DescriptorType::UNIFORM_BUFFER {
                         frames
+                    } else if ty == vk::DescriptorType::SAMPLED_IMAGE {
+                        frames * 3
                     } else {
                         frames * 2
                     },
@@ -330,6 +340,7 @@ impl SceneGpu {
                 );
             }
         }
+        self.shadow.bind_images(&slot.sets);
         self.textures.insert(handle, slot);
         Ok(())
     }
@@ -478,7 +489,7 @@ impl SceneGpu {
                         .descriptor_count(frames),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count(frames * 2),
+                        .descriptor_count(frames * 3),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLER)
                         .descriptor_count(frames * 2),
@@ -583,7 +594,22 @@ fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>,
         data.extend_from_slice(&light.position.extend(light.range).to_array());
         data.extend_from_slice(&light.intensity.extend(0.0).to_array());
     }
-    data.resize(CAMERA_BYTES as usize / 4, 0.0);
+    data.resize((CAMERA_BYTES as usize - 80) / 4, 0.0);
+    let matrix = match world.directional_shadow {
+        Some(shadow) => shadow.view_projection(world.light_direction)?,
+        None => glam::Mat4::IDENTITY,
+    };
+    data.extend_from_slice(&matrix.to_cols_array());
+    data.extend_from_slice(&[
+        world.directional_shadow.map_or(0.0, |s| s.bias),
+        if world.directional_shadow.is_some() {
+            1.0
+        } else {
+            0.0
+        },
+        0.0,
+        0.0,
+    ]);
     Ok(floats(&data))
 }
 #[cfg(test)]
@@ -593,6 +619,7 @@ mod light_abi_tests {
     fn light_array_offsets_stride_count_and_unused_slots_match_shader() {
         let mut world = RenderWorld {
             post_process: Default::default(),
+            directional_shadow: None,
             camera: Default::default(),
             light_direction: glam::Vec3::Y,
             light_radiance: glam::Vec3::splat(4.0),
@@ -612,7 +639,7 @@ mod light_abi_tests {
         };
         let bytes = frame_constants(&world, extent).unwrap();
         let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 624);
+        assert_eq!(bytes.len(), 704);
         assert_eq!(value(108), 16.0);
         for index in 0..govno_render::MAX_POINT_LIGHTS {
             for (component, expected) in [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 0.0]
@@ -624,6 +651,23 @@ mod light_abi_tests {
         }
         world.point_lights.clear();
         let bytes = frame_constants(&world, extent).unwrap();
-        assert!(bytes[108..].iter().all(|&b| b == 0));
+        assert!(bytes[108..624].iter().all(|&b| b == 0));
+        let shadow = govno_render::DirectionalShadow::default();
+        world.directional_shadow = Some(shadow);
+        let bytes = frame_constants(&world, extent).unwrap();
+        assert_eq!(
+            &bytes[624..688],
+            floats(
+                &shadow
+                    .view_projection(world.light_direction)
+                    .unwrap()
+                    .to_cols_array()
+            )
+        );
+        assert_eq!(
+            f32::from_ne_bytes(bytes[688..692].try_into().unwrap()),
+            shadow.bias
+        );
+        assert_eq!(f32::from_ne_bytes(bytes[692..696].try_into().unwrap()), 1.0);
     }
 }
