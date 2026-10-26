@@ -94,6 +94,13 @@ impl VulkanRenderer {
         &mut self,
         data: &govno_render::TextureData,
     ) -> Result<govno_render::TextureHandle, BoxError> {
+        self.upload_texture_with_sampling(data, Default::default())
+    }
+    pub fn upload_texture_with_sampling(
+        &mut self,
+        data: &govno_render::TextureData,
+        sampling: govno_render::TextureSampling,
+    ) -> Result<govno_render::TextureHandle, BoxError> {
         if self.failed {
             return Err("renderer has failed".into());
         }
@@ -102,7 +109,7 @@ impl VulkanRenderer {
             .next_mesh
             .checked_add(1)
             .ok_or("resource ID exhausted")?;
-        self.scene_gpu.upload_texture(handle, data)?;
+        self.scene_gpu.upload_texture(handle, data, sampling)?;
         Ok(handle)
     }
     pub fn remove_texture(&mut self, handle: govno_render::TextureHandle) -> Result<(), BoxError> {

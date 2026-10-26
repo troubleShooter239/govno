@@ -74,3 +74,72 @@ mod texture_tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureFilter {
+    Nearest,
+    Linear,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MipFilter {
+    None,
+    Nearest,
+    Linear,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureWrap {
+    Repeat,
+    MirroredRepeat,
+    ClampToEdge,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct TextureSampling {
+    pub min: TextureFilter,
+    pub mag: TextureFilter,
+    pub mip: MipFilter,
+    pub wrap_u: TextureWrap,
+    pub wrap_v: TextureWrap,
+}
+impl Default for TextureSampling {
+    fn default() -> Self {
+        Self {
+            min: TextureFilter::Linear,
+            mag: TextureFilter::Linear,
+            mip: MipFilter::Linear,
+            wrap_u: TextureWrap::Repeat,
+            wrap_v: TextureWrap::Repeat,
+        }
+    }
+}
+impl TextureSampling {
+    pub fn mip_levels(self, width: u32, height: u32) -> u32 {
+        if width == 0 || height == 0 {
+            return 0;
+        }
+        if self.mip == MipFilter::None {
+            1
+        } else {
+            u32::BITS - width.max(height).leading_zeros()
+        }
+    }
+}
+#[cfg(test)]
+mod mip_tests {
+    use super::*;
+    #[test]
+    fn mip_count_handles_rectangular_and_non_power_of_two_images() {
+        let sampling = TextureSampling::default();
+        assert_eq!(sampling.mip_levels(1, 1), 1);
+        assert_eq!(sampling.mip_levels(64, 8), 7);
+        assert_eq!(sampling.mip_levels(7, 3), 3);
+        assert_eq!(sampling.mip_levels(0, 4), 0);
+        assert_eq!(
+            TextureSampling {
+                mip: MipFilter::None,
+                ..sampling
+            }
+            .mip_levels(64, 64),
+            1
+        );
+    }
+}

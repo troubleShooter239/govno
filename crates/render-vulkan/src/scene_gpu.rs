@@ -215,8 +215,9 @@ impl SceneGpu {
         &mut self,
         handle: govno_render::TextureHandle,
         data: &govno_render::TextureData,
+        sampling: govno_render::TextureSampling,
     ) -> Result<(), BoxError> {
-        let texture = crate::texture::Texture::new(self.memory.clone(), data)?;
+        let texture = crate::texture::Texture::with_sampling(self.memory.clone(), data, sampling)?;
         let frames = self.cameras.len() as u32;
         let mut slot = TextureSlot {
             ctx: self.ctx.clone(),

@@ -153,7 +153,9 @@ fn main() -> Result<(), BoxError> {
                     let mesh = renderer.upload_mesh(&primitive.mesh)?;
                     let mut material = primitive.material;
                     material.base_color_texture = Some(match primitive.base_color_texture {
-                        Some(data) => renderer.upload_texture(&data)?,
+                        Some(data) => {
+                            renderer.upload_texture_with_sampling(&data, primitive.sampling)?
+                        }
                         None => white,
                     });
                     world.instances.push(govno_render::DrawInstance {

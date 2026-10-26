@@ -168,13 +168,19 @@ impl ImageResource {
             depth_range(),
         )
     }
-    pub fn sampled(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
+    pub fn sampled(
+        memory: Rc<Memory>,
+        extent: vk::Extent2D,
+        levels: u32,
+    ) -> Result<Self, BoxError> {
         Self::with_usage(
             memory,
             extent,
             vk::Format::R8G8B8A8_SRGB,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            crate::swapchain::color_range(),
+            vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::SAMPLED,
+            crate::swapchain::color_range().level_count(levels),
         )
     }
     fn with_usage(
@@ -202,7 +208,7 @@ impl ImageResource {
                         height: extent.height,
                         depth: 1,
                     })
-                    .mip_levels(1)
+                    .mip_levels(range.level_count)
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
