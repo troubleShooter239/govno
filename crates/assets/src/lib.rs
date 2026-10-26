@@ -1,7 +1,9 @@
-//! CPU-only static glTF/GLB decoding. No Vulkan or window dependencies.
+//! CPU-only static glTF/GLB and Radiance HDR decoding. No Vulkan or window dependencies.
+mod hdr;
 use glam::{Mat4, Vec3};
 use govno_core::BoxError;
 use govno_render::{Material, MeshData, TextureData, Vertex};
+pub use hdr::{HdrPanorama, MAX_HDR_PIXELS, decode_hdr, load_hdr};
 use std::path::Path;
 
 pub struct ImportedPrimitive {

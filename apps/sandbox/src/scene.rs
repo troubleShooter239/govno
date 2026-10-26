@@ -64,6 +64,7 @@ pub fn sphere() -> MeshData {
 pub fn build(
     renderer: &mut VulkanRenderer,
     smoke: bool,
+    environment: &govno_render::SpecularEnvironment,
 ) -> Result<(RenderWorld, usize, Option<MeshHandle>), BoxError> {
     let mut rgba8 = Vec::new();
     for y in 0..64 {
@@ -213,8 +214,7 @@ pub fn build(
     } else {
         None
     };
-    let environment = environment()?;
-    renderer.set_specular_environment(&environment)?;
+    renderer.set_specular_environment(environment)?;
     let world = RenderWorld {
         post_process: Default::default(),
         directional_shadow: Some(Default::default()),

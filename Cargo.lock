@@ -550,6 +550,7 @@ dependencies = [
  "gltf",
  "govno-core",
  "govno-render",
+ "image",
 ]
 
 [[package]]

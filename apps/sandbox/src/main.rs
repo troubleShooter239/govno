@@ -20,6 +20,7 @@ struct GraphicsApp {
     shadows: bool,
     environment: bool,
     specular: bool,
+    environment_data: govno_render::SpecularEnvironment,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -96,9 +97,9 @@ impl WindowDriver for GraphicsApp {
                 tracing::info!("smoke: constant HDR environment enabled");
             }
             if self.frames == 32 {
-                let environment = scene::environment()?;
-                self.renderer.set_specular_environment(&environment)?;
-                self.world.diffuse_environment = Some(environment.diffuse().clone());
+                self.renderer
+                    .set_specular_environment(&self.environment_data)?;
+                self.world.diffuse_environment = Some(self.environment_data.diffuse().clone());
                 self.world.specular_environment = self.specular;
                 tracing::info!("smoke: projected panorama environment restored");
             }
@@ -190,6 +191,7 @@ fn main() -> Result<(), BoxError> {
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
+    let mut environment_path = None;
     let mut shadows = true;
     let mut environment = true;
     let mut specular = true;
@@ -214,6 +216,9 @@ fn main() -> Result<(), BoxError> {
                     .parse()?;
                 post_process.validate()?;
             }
+            "--environment" => {
+                environment_path = Some(args.next().ok_or("--environment requires an HDR path")?)
+            }
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
             "--no-shadows" => shadows = false,
             "--no-environment" => environment = false,
@@ -223,7 +228,7 @@ fn main() -> Result<(), BoxError> {
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--frames N] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--frames N] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -234,6 +239,17 @@ fn main() -> Result<(), BoxError> {
         return Err("--smoke requires --frames N with N >= 80".into());
     }
     let imported = gltf_path.map(govno_assets::load_gltf).transpose()?;
+    let environment_data = if let Some(path) = environment_path {
+        let panorama = govno_assets::load_hdr(&path)?;
+        tracing::info!(path,width=panorama.width,height=panorama.height,exposure=?panorama.exposure,color_correction=?panorama.color_correction,"HDR panorama decoded; stored radiance preserved");
+        govno_render::SpecularEnvironment::from_equirectangular(
+            panorama.width,
+            panorama.height,
+            &panorama.radiance,
+        )?
+    } else {
+        scene::environment()?
+    };
     let smoke = options.smoke;
     let stats = Arc::new(ValidationStats::default());
     let callback_stats = stats.clone();
@@ -249,7 +265,8 @@ fn main() -> Result<(), BoxError> {
                 validation,
                 callback_stats,
             )?;
-            let (mut world, animated, temporary) = scene::build(&mut renderer, smoke)?;
+            let (mut world, animated, temporary) =
+                scene::build(&mut renderer, smoke, &environment_data)?;
             if let Some(primitives) = imported {
                 let white = renderer.upload_texture(&govno_render::TextureData {
                     color_space: Default::default(),
@@ -312,6 +329,7 @@ fn main() -> Result<(), BoxError> {
                 shadows,
                 environment,
                 specular,
+                environment_data,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");
