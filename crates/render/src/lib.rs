@@ -21,8 +21,15 @@ pub enum FrameStatus {
     Skipped,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextureColorSpace {
+    #[default]
+    Srgb,
+    Linear,
+}
 /// Tightly packed, top-left-origin base-color pixels in sRGB RGBA8.
 pub struct TextureData {
+    pub color_space: TextureColorSpace,
     pub width: u32,
     pub height: u32,
     pub rgba8: Vec<u8>,
@@ -47,6 +54,7 @@ mod texture_tests {
     fn malformed_pixels_are_rejected() {
         assert!(
             TextureData {
+                color_space: Default::default(),
                 width: 0,
                 height: 1,
                 rgba8: vec![]
@@ -56,6 +64,7 @@ mod texture_tests {
         );
         assert!(
             TextureData {
+                color_space: Default::default(),
                 width: 2,
                 height: 2,
                 rgba8: vec![255; 15]
@@ -65,6 +74,7 @@ mod texture_tests {
         );
         assert!(
             TextureData {
+                color_space: Default::default(),
                 width: 1,
                 height: 1,
                 rgba8: vec![255; 4]

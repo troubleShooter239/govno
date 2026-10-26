@@ -10,11 +10,17 @@ struct FrameData
 [[vk::binding(1, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(2, 0)]] SamplerState baseColorSampler;
 
+[[vk::binding(1, 1)]] Texture2D<float4> normalTexture;
+[[vk::binding(2, 1)]] SamplerState normalSampler;
+[[vk::binding(1, 2)]] Texture2D<float4> metalRoughTexture;
+[[vk::binding(2, 2)]] SamplerState metalRoughSampler;
+
 struct DrawData
 {
     column_major float4x4 model;
     float4 inverseScaleSquaredRoughness;
     float4 baseColorMetallic;
+    float4 normalParams; // x scale, y enabled
 };
 [[vk::push_constant]] ConstantBuffer<DrawData> draw;
 
@@ -56,6 +62,21 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
 {
     const float PI = 3.14159265359;
     float3 n = safeNormalize(input.worldNormal);
+    if (draw.normalParams.y > 0.5) {
+        float3 px = ddx(input.worldPosition), py = ddy(input.worldPosition);
+        float2 ux = ddx(input.uv), uy = ddy(input.uv);
+        float determinant = ux.x * uy.y - ux.y * uy.x;
+        if (abs(determinant) > 1e-8) {
+            float3 tangent = (px * uy.y - py * ux.y) / determinant;
+            float3 bitangent = (py * ux.x - px * uy.x) / determinant;
+            tangent = safeNormalize(tangent - n * dot(n,tangent));
+            float handedness = dot(cross(n,tangent), bitangent) < 0.0 ? -1.0 : 1.0;
+            bitangent = cross(n,tangent) * handedness;
+            float3 mapped = normalTexture.Sample(normalSampler,input.uv).xyz * 2.0 - 1.0;
+            mapped.xy *= draw.normalParams.x;
+            n = safeNormalize(tangent * mapped.x + bitangent * mapped.y + n * mapped.z);
+        }
+    }
     float3 v = safeNormalize(frame.cameraPosition.xyz - input.worldPosition);
     float3 l = frame.lightDirection.xyz;
     float3 h = safeNormalize(v + l);
@@ -64,8 +85,9 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float nh = saturate(dot(n,h));
     float vh = saturate(dot(v,h));
     float3 base = draw.baseColorMetallic.xyz * baseColorTexture.Sample(baseColorSampler, input.uv).rgb;
-    float metal = draw.baseColorMetallic.w;
-    float roughness = draw.inverseScaleSquaredRoughness.w;
+    float2 mr = metalRoughTexture.Sample(metalRoughSampler,input.uv).gb;
+    float metal = saturate(draw.baseColorMetallic.w * mr.y);
+    float roughness = clamp(draw.inverseScaleSquaredRoughness.w * mr.x,0.045,1.0);
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
     float denominator = nh * nh * (alpha2 - 1.0) + 1.0;

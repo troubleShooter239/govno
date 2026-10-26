@@ -88,6 +88,9 @@ impl Transform {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Material {
+    pub normal_texture: Option<TextureHandle>,
+    pub metallic_roughness_texture: Option<TextureHandle>,
+    pub normal_scale: f32,
     pub base_color_texture: Option<TextureHandle>,
     pub base_color: Vec3,
     pub metallic: f32,
@@ -95,7 +98,9 @@ pub struct Material {
 }
 impl Material {
     pub fn validate(self) -> Result<(), BoxError> {
-        if !self.base_color.is_finite()
+        if !self.normal_scale.is_finite()
+            || self.normal_scale < 0.0
+            || !self.base_color.is_finite()
             || self.base_color.min_element() < 0.0
             || self.base_color.max_element() > 1.0
             || !self.metallic.is_finite()
@@ -170,6 +175,9 @@ mod tests {
         );
         assert!(
             Material {
+                normal_texture: None,
+                metallic_roughness_texture: None,
+                normal_scale: 1.0,
                 base_color_texture: None,
                 base_color: Vec3::ONE,
                 metallic: f32::NAN,

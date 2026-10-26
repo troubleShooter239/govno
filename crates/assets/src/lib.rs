@@ -9,6 +9,8 @@ pub struct ImportedPrimitive {
     pub material: Material,
     pub base_color_texture: Option<TextureData>,
     pub sampling: govno_render::TextureSampling,
+    pub normal_texture: Option<(TextureData, govno_render::TextureSampling)>,
+    pub metallic_roughness_texture: Option<(TextureData, govno_render::TextureSampling)>,
 }
 pub fn load_gltf(path: impl AsRef<Path>) -> Result<Vec<ImportedPrimitive>, BoxError> {
     let (document, buffers, images) = gltf::import(path)?;
@@ -63,18 +65,19 @@ fn visit(
             let source = primitive.material();
             let pbr = source.pbr_metallic_roughness();
             if source.alpha_mode() != gltf::material::AlphaMode::Opaque
-                || source.normal_texture().is_some()
                 || source.occlusion_texture().is_some()
                 || source.emissive_texture().is_some()
                 || source.emissive_factor() != [0.0; 3]
-                || pbr.metallic_roughness_texture().is_some()
             {
                 return Err(
                     "unsupported material: need opaque base-color-only metallic/roughness".into(),
                 );
             }
             let factor = pbr.base_color_factor();
-            let material = Material {
+            let mut material = Material {
+                normal_texture: None,
+                metallic_roughness_texture: None,
+                normal_scale: 1.0,
                 base_color_texture: None,
                 base_color: Vec3::new(factor[0], factor[1], factor[2]),
                 metallic: pbr.metallic_factor(),
@@ -105,28 +108,44 @@ fn visit(
                 }
                 let sampler = info.texture().sampler();
                 sampling = decode_sampler(sampler);
-                let image = &images[info.texture().source().index()];
-                let rgba8 = match image.format {
-                    gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
-                    gltf::image::Format::R8G8B8 => image
-                        .pixels
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .flat_map(|p| [p[0], p[1], p[2], 255])
-                        .collect(),
-                    _ => return Err("only RGB8/RGBA8 images are supported".into()),
-                };
-                let data = TextureData {
-                    width: image.width,
-                    height: image.height,
-                    rgba8,
-                };
-                data.validate()?;
+                let data = decode_image(
+                    &images[info.texture().source().index()],
+                    govno_render::TextureColorSpace::Srgb,
+                )?;
                 Some(data)
             } else {
                 None
             };
+            let normal_texture = if let Some(info) = source.normal_texture() {
+                if info.tex_coord() != 0 || uv.is_none() {
+                    return Err("normal texture requires UV0".into());
+                }
+                material.normal_scale = info.scale();
+                Some((
+                    decode_image(
+                        &images[info.texture().source().index()],
+                        govno_render::TextureColorSpace::Linear,
+                    )?,
+                    decode_sampler(info.texture().sampler()),
+                ))
+            } else {
+                None
+            };
+            let metallic_roughness_texture = if let Some(info) = pbr.metallic_roughness_texture() {
+                if info.tex_coord() != 0 || uv.is_none() {
+                    return Err("metallic/roughness texture requires UV0".into());
+                }
+                Some((
+                    decode_image(
+                        &images[info.texture().source().index()],
+                        govno_render::TextureColorSpace::Linear,
+                    )?,
+                    decode_sampler(info.texture().sampler()),
+                ))
+            } else {
+                None
+            };
+            material.validate()?;
             let vertices = positions
                 .iter()
                 .zip(&normals)
@@ -158,6 +177,8 @@ fn visit(
                 material,
                 base_color_texture: texture,
                 sampling,
+                normal_texture,
+                metallic_roughness_texture,
             });
         }
     }
@@ -165,6 +186,30 @@ fn visit(
         visit(child, matrix, depth + 1, buffers, images, output)?;
     }
     Ok(())
+}
+fn decode_image(
+    image: &gltf::image::Data,
+    color_space: govno_render::TextureColorSpace,
+) -> Result<TextureData, BoxError> {
+    let rgba8 = match image.format {
+        gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+        gltf::image::Format::R8G8B8 => image
+            .pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return Err("only RGB8/RGBA8 images supported".into()),
+    };
+    let data = TextureData {
+        width: image.width,
+        height: image.height,
+        rgba8,
+        color_space,
+    };
+    data.validate()?;
+    Ok(data)
 }
 fn decode_sampler(sampler: gltf::texture::Sampler<'_>) -> govno_render::TextureSampling {
     use gltf::texture::{MagFilter, MinFilter, WrappingMode};
@@ -202,6 +247,32 @@ mod tests {
         let (_, buffers, images) = gltf::import(path)?;
         let document = gltf::Gltf::from_slice(source.as_bytes())?.document;
         decode(document, buffers, images)
+    }
+    #[test]
+    fn material_data_maps_are_linear_and_normal_scale_is_preserved() {
+        let source = include_str!("../tests/fixtures/triangle.gltf")
+            .replace(
+                "\"pbrMetallicRoughness\":",
+                "\"normalTexture\":{\"index\":0,\"scale\":0.3},\"pbrMetallicRoughness\":",
+            )
+            .replace(
+                "\"metallicFactor\":0",
+                "\"metallicRoughnessTexture\":{\"index\":0},\"metallicFactor\":0",
+            );
+        let item = modified(&source).unwrap().remove(0);
+        assert_eq!(item.material.normal_scale, 0.3);
+        assert_eq!(
+            item.normal_texture.unwrap().0.color_space,
+            govno_render::TextureColorSpace::Linear
+        );
+        assert_eq!(
+            item.metallic_roughness_texture.unwrap().0.color_space,
+            govno_render::TextureColorSpace::Linear
+        );
+        assert_eq!(
+            item.base_color_texture.unwrap().color_space,
+            govno_render::TextureColorSpace::Srgb
+        );
     }
     #[test]
     fn explicit_sampler_filters_and_address_modes_survive_import() {

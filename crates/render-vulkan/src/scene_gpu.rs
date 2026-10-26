@@ -9,7 +9,7 @@ use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
 pub(crate) const CAMERA_BYTES: u64 = 112;
-pub(crate) const DRAW_BYTES: u32 = 96;
+pub(crate) const DRAW_BYTES: u32 = 112;
 pub(crate) struct SceneGpu {
     ctx: Arc<DeviceContext>,
     pub layout: vk::DescriptorSetLayout,
@@ -102,10 +102,23 @@ impl SceneGpu {
             }
         }
         owner.set_texture(&govno_render::TextureData {
+            color_space: Default::default(),
             width: 1,
             height: 1,
             rgba8: vec![255; 4],
         })?;
+        for (index, rgba8) in [(0, vec![128, 128, 255, 255]), (1, vec![255; 4])] {
+            owner.upload_texture(
+                govno_render::TextureHandle::from_parts(0, index),
+                &govno_render::TextureData {
+                    width: 1,
+                    height: 1,
+                    rgba8,
+                    color_space: govno_render::TextureColorSpace::Linear,
+                },
+                Default::default(),
+            )?;
+        }
         Ok(owner)
     }
     /// Caller has quiesced all descriptor users before entering this method.
@@ -190,6 +203,16 @@ pub(crate) fn draw_constants(instance: &DrawInstance) -> Vec<u8> {
             .extend(instance.material.metallic)
             .to_array(),
     );
+    data.extend_from_slice(&[
+        instance.material.normal_scale,
+        if instance.material.normal_texture.is_some() {
+            1.0
+        } else {
+            0.0
+        },
+        0.0,
+        0.0,
+    ]);
     floats(&data)
 }
 fn floats(values: &[f32]) -> Vec<u8> {
@@ -201,6 +224,7 @@ struct TextureSlot {
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     _texture: crate::texture::Texture,
+    color_space: govno_render::TextureColorSpace,
 }
 impl Drop for TextureSlot {
     fn drop(&mut self) {
@@ -224,6 +248,7 @@ impl SceneGpu {
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
             _texture: texture,
+            color_space: data.color_space,
         };
         // SAFETY: new descriptor sets have no GPU users; retained cameras/textures
         // outlive the slot. Partial allocation is owned by its pool.
@@ -297,7 +322,62 @@ impl SceneGpu {
                 .sets[frame]),
         }
     }
+    pub fn descriptors(
+        &self,
+        frame: usize,
+        material: &govno_render::Material,
+    ) -> Result<[vk::DescriptorSet; 3], BoxError> {
+        for (handle, space) in [
+            (
+                material.base_color_texture,
+                govno_render::TextureColorSpace::Srgb,
+            ),
+            (
+                material.normal_texture,
+                govno_render::TextureColorSpace::Linear,
+            ),
+            (
+                material.metallic_roughness_texture,
+                govno_render::TextureColorSpace::Linear,
+            ),
+        ] {
+            if let Some(handle) = handle
+                && self
+                    .textures
+                    .get(&handle)
+                    .ok_or("unknown texture handle")?
+                    .color_space
+                    != space
+            {
+                return Err("texture color space does not match material slot".into());
+            }
+        }
+        Ok([
+            self.descriptor(frame, material.base_color_texture)?,
+            self.descriptor(
+                frame,
+                Some(
+                    material
+                        .normal_texture
+                        .unwrap_or(govno_render::TextureHandle::from_parts(0, 0)),
+                ),
+            )?,
+            self.descriptor(
+                frame,
+                Some(
+                    material
+                        .metallic_roughness_texture
+                        .unwrap_or(govno_render::TextureHandle::from_parts(0, 1)),
+                ),
+            )?,
+        ])
+    }
     pub fn remove_texture(&mut self, handle: govno_render::TextureHandle) -> Result<(), BoxError> {
+        if handle == govno_render::TextureHandle::from_parts(0, 0)
+            || handle == govno_render::TextureHandle::from_parts(0, 1)
+        {
+            return Err("reserved fallback texture".into());
+        }
         self.textures
             .remove(&handle)
             .ok_or("unknown or removed texture handle")?;
@@ -319,6 +399,9 @@ mod tests {
                 ..Default::default()
             },
             material: Material {
+                normal_texture: None,
+                metallic_roughness_texture: None,
+                normal_scale: 1.0,
                 base_color_texture: None,
                 base_color: Vec3::ONE,
                 metallic: 0.7,

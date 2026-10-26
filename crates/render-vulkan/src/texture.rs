@@ -24,13 +24,18 @@ impl Texture {
         sampling: govno_render::TextureSampling,
     ) -> Result<Self, BoxError> {
         data.validate()?;
+        let format = if data.color_space == govno_render::TextureColorSpace::Srgb {
+            vk::Format::R8G8B8A8_SRGB
+        } else {
+            vk::Format::R8G8B8A8_UNORM
+        };
         let levels = sampling.mip_levels(data.width, data.height);
         // SAFETY: physical device belongs to the retained instance.
         let features = unsafe {
-            memory.ctx.instance().get_physical_device_format_properties(
-                memory.ctx.physical,
-                vk::Format::R8G8B8A8_SRGB,
-            )
+            memory
+                .ctx
+                .instance()
+                .get_physical_device_format_properties(memory.ctx.physical, format)
         }
         .optimal_tiling_features;
         if levels > 1
@@ -40,7 +45,7 @@ impl Texture {
                     | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
             )
         {
-            return Err("sRGB linear blit unsupported: cannot generate mipmaps".into());
+            return Err("texture format linear blit unsupported: cannot generate mipmaps".into());
         }
         // SAFETY: querying capabilities for the retained physical device.
         let props = unsafe {
@@ -61,6 +66,7 @@ impl Texture {
                 height: data.height,
             },
             levels,
+            format,
         )?;
         let mut owner = Self {
             memory: memory.clone(),

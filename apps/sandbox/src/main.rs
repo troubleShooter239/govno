@@ -68,6 +68,7 @@ impl WindowDriver for GraphicsApp {
         if self.smoke && self.frames == 40 {
             self.renderer
                 .set_base_color_texture(&govno_render::TextureData {
+                    color_space: Default::default(),
                     width: 2,
                     height: 2,
                     rgba8: vec![
@@ -145,6 +146,7 @@ fn main() -> Result<(), BoxError> {
             let (mut world, animated, temporary) = scene::build(&mut renderer, smoke)?;
             if let Some(primitives) = imported {
                 let white = renderer.upload_texture(&govno_render::TextureData {
+                    color_space: Default::default(),
                     width: 1,
                     height: 1,
                     rgba8: vec![255; 4],
@@ -158,6 +160,14 @@ fn main() -> Result<(), BoxError> {
                         }
                         None => white,
                     });
+                    if let Some((data, sampling)) = primitive.normal_texture {
+                        material.normal_texture =
+                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                    }
+                    if let Some((data, sampling)) = primitive.metallic_roughness_texture {
+                        material.metallic_roughness_texture =
+                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                    }
                     world.instances.push(govno_render::DrawInstance {
                         mesh,
                         material,

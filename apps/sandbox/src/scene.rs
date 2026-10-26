@@ -71,6 +71,7 @@ pub fn build(
         }
     }
     renderer.set_base_color_texture(&govno_render::TextureData {
+        color_space: Default::default(),
         width: 64,
         height: 64,
         rgba8,
@@ -78,6 +79,7 @@ pub fn build(
     let cube = renderer.upload_mesh(&cube())?;
     let sphere = renderer.upload_mesh(&sphere())?;
     let white = renderer.upload_texture(&govno_render::TextureData {
+        color_space: Default::default(),
         width: 1,
         height: 1,
         rgba8: vec![255; 4],
@@ -93,6 +95,9 @@ pub fn build(
                     ..Default::default()
                 },
                 material: Material {
+                    normal_texture: None,
+                    metallic_roughness_texture: None,
+                    normal_scale: 1.0,
                     base_color_texture: Some(white),
                     base_color: if row == 0 {
                         Vec3::new(0.12, 0.48, 0.8)
@@ -114,6 +119,9 @@ pub fn build(
             rotation: Quat::from_rotation_y(0.3),
         },
         material: Material {
+            normal_texture: None,
+            metallic_roughness_texture: None,
+            normal_scale: 1.0,
             base_color_texture: Some(white),
             base_color: Vec3::new(0.65, 0.12, 0.08),
             metallic: 0.1,
@@ -129,12 +137,41 @@ pub fn build(
             ..Default::default()
         },
         material: Material {
+            normal_texture: None,
+            metallic_roughness_texture: None,
+            normal_scale: 1.0,
             base_color_texture: None,
             base_color: Vec3::splat(0.24),
             metallic: 0.0,
             roughness: 0.9,
         },
     });
+    let mut normals = Vec::new();
+    let mut metal_rough = Vec::new();
+    for y in 0..32 {
+        for x in 0..32 {
+            let nx = ((x as f32 * 0.65).sin() * 0.35 * 127.0 + 128.0) as u8;
+            let ny = ((y as f32 * 0.65).cos() * 0.35 * 127.0 + 128.0) as u8;
+            normals.extend_from_slice(&[nx, ny, 240, 255]);
+            metal_rough.extend_from_slice(&[255, (40 + x * 6) as u8, 220, 255]);
+        }
+    }
+    instances[animated].material.normal_texture =
+        Some(renderer.upload_texture(&govno_render::TextureData {
+            width: 32,
+            height: 32,
+            rgba8: normals,
+            color_space: govno_render::TextureColorSpace::Linear,
+        })?);
+    instances[animated].material.metallic_roughness_texture =
+        Some(renderer.upload_texture(&govno_render::TextureData {
+            width: 32,
+            height: 32,
+            rgba8: metal_rough,
+            color_space: govno_render::TextureColorSpace::Linear,
+        })?);
+    instances[animated].material.metallic = 0.8;
+    instances[animated].material.roughness = 0.9;
     let temporary = if smoke {
         let handle = renderer.upload_mesh(&self::cube())?;
         instances.push(DrawInstance {
@@ -144,6 +181,9 @@ pub fn build(
                 ..Default::default()
             },
             material: Material {
+                normal_texture: None,
+                metallic_roughness_texture: None,
+                normal_scale: 1.0,
                 base_color_texture: None,
                 base_color: Vec3::new(0.1, 0.8, 0.2),
                 metallic: 0.0,

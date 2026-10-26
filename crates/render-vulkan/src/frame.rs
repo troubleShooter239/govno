@@ -147,14 +147,6 @@ impl Frame {
                 vk::PipelineBindPoint::GRAPHICS,
                 chain.pipeline.pipeline,
             );
-            device.cmd_bind_descriptor_sets(
-                self.command,
-                vk::PipelineBindPoint::GRAPHICS,
-                chain.pipeline.layout,
-                0,
-                &[scene.descriptor(frame_index, None)?],
-                &[],
-            );
             device.cmd_set_viewport(
                 self.command,
                 0,
@@ -181,7 +173,7 @@ impl Frame {
                     vk::PipelineBindPoint::GRAPHICS,
                     chain.pipeline.layout,
                     0,
-                    &[scene.descriptor(frame_index, instance.material.base_color_texture)?],
+                    &scene.descriptors(frame_index, &instance.material)?,
                     &[],
                 );
                 let mesh = meshes

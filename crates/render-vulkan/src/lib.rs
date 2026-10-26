@@ -84,6 +84,9 @@ impl VulkanRenderer {
         data: &govno_render::TextureData,
     ) -> Result<(), BoxError> {
         data.validate()?;
+        if data.color_space != govno_render::TextureColorSpace::Srgb {
+            return Err("shared base-color texture must be sRGB".into());
+        }
         if self.failed {
             return Err("renderer has failed".into());
         }
@@ -176,7 +179,7 @@ impl VulkanRenderer {
         world.validate(self.extent)?;
         for item in &world.instances {
             self.scene_gpu
-                .descriptor(self.frame_index, item.material.base_color_texture)?;
+                .descriptors(self.frame_index, &item.material)?;
         }
         if world
             .instances

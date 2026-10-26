@@ -172,11 +172,12 @@ impl ImageResource {
         memory: Rc<Memory>,
         extent: vk::Extent2D,
         levels: u32,
+        format: vk::Format,
     ) -> Result<Self, BoxError> {
         Self::with_usage(
             memory,
             extent,
-            vk::Format::R8G8B8A8_SRGB,
+            format,
             vk::ImageUsageFlags::TRANSFER_DST
                 | vk::ImageUsageFlags::TRANSFER_SRC
                 | vk::ImageUsageFlags::SAMPLED,
