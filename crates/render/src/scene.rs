@@ -4,6 +4,7 @@ use govno_core::BoxError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
+    pub uv: [f32; 2],
     pub position: [f32; 3],
     pub normal: [f32; 3],
 }
@@ -22,7 +23,8 @@ impl MeshData {
             return Err("mesh must contain indexed triangles within u32 limits".into());
         }
         for vertex in &self.vertices {
-            if !Vec3::from_array(vertex.position).is_finite()
+            if !vertex.uv.iter().all(|v| v.is_finite())
+                || !Vec3::from_array(vertex.position).is_finite()
                 || !Vec3::from_array(vertex.normal).is_finite()
                 || Vec3::from_array(vertex.normal).length_squared() < 1e-8
             {
@@ -144,6 +146,7 @@ mod tests {
         let mut mesh = MeshData {
             vertices: vec![Vertex {
                 position: [0.0; 3],
+                uv: [0.0; 2],
                 normal: [0.0, 1.0, 0.0],
             }],
             indices: vec![0, 0, 1],

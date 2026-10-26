@@ -13,7 +13,7 @@ pub(crate) struct GpuMesh {
     pub indices: Buffer,
     pub index_count: u32,
 }
-struct Upload {
+pub(crate) struct Upload {
     ctx: Arc<DeviceContext>,
     pool: vk::CommandPool,
     fence: vk::Fence,
@@ -42,7 +42,7 @@ impl GpuMesh {
         let vertices: Vec<u8> = mesh
             .vertices
             .iter()
-            .flat_map(|v| v.position.into_iter().chain(v.normal))
+            .flat_map(|v| v.position.into_iter().chain(v.normal).chain(v.uv))
             .flat_map(f32::to_ne_bytes)
             .collect();
         let indices: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_ne_bytes()).collect();
@@ -70,72 +70,38 @@ impl GpuMesh {
             )?,
             index_count: mesh.indices.len() as u32,
         };
-        let ctx = &memory.ctx;
-        let mut upload = Upload {
-            ctx: ctx.clone(),
-            pool: vk::CommandPool::null(),
-            fence: vk::Fence::null(),
-            submitted: false,
-        };
-        // SAFETY: source/destination buffers live until fence completion; sizes are
-        // validated and offsets are multiples of four. Queue access is serialized.
-        unsafe {
-            upload.pool = ctx.device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(ctx.family)
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
-                None,
-            )?;
-            upload.fence = ctx
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?;
-            let command = ctx.device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(upload.pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0];
-            ctx.device.begin_command_buffer(
-                command,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            ctx.device.cmd_copy_buffer(
-                command,
-                staging.handle,
-                gpu.vertices.handle,
-                &[vk::BufferCopy::default().size(vertices.len() as u64)],
-            );
-            ctx.device.cmd_copy_buffer(
-                command,
-                staging.handle,
-                gpu.indices.handle,
-                &[vk::BufferCopy::default()
-                    .src_offset(vertices.len() as u64)
-                    .size(indices.len() as u64)],
-            );
-            let barriers = [vk::MemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_INPUT)
-                .dst_access_mask(
-                    vk::AccessFlags2::VERTEX_ATTRIBUTE_READ | vk::AccessFlags2::INDEX_READ,
-                )];
-            ctx.device.cmd_pipeline_barrier2(
-                command,
-                &vk::DependencyInfo::default().memory_barriers(&barriers),
-            );
-            ctx.device.end_command_buffer(command)?;
-            let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command)];
-            ctx.device.queue_submit2(
-                ctx.queue,
-                &[vk::SubmitInfo2::default().command_buffer_infos(&commands)],
-                upload.fence,
-            )?;
-            upload.submitted = true;
-            ctx.device
-                .wait_for_fences(&[upload.fence], true, u64::MAX)?;
-        }
+        let ctx = memory.ctx.clone();
+        Upload::run(ctx.clone(), |command| {
+            // SAFETY: staging and destination buffers remain live through upload
+            // completion; validated ranges are aligned and within each buffer.
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    command,
+                    staging.handle,
+                    gpu.vertices.handle,
+                    &[vk::BufferCopy::default().size(vertices.len() as u64)],
+                );
+                ctx.device.cmd_copy_buffer(
+                    command,
+                    staging.handle,
+                    gpu.indices.handle,
+                    &[vk::BufferCopy::default()
+                        .src_offset(vertices.len() as u64)
+                        .size(indices.len() as u64)],
+                );
+                let barriers = [vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_INPUT)
+                    .dst_access_mask(
+                        vk::AccessFlags2::VERTEX_ATTRIBUTE_READ | vk::AccessFlags2::INDEX_READ,
+                    )];
+                ctx.device.cmd_pipeline_barrier2(
+                    command,
+                    &vk::DependencyInfo::default().memory_barriers(&barriers),
+                );
+            }
+        })?;
         tracing::info!(
             vertices = mesh.vertices.len(),
             indices = mesh.indices.len(),
@@ -161,6 +127,57 @@ impl<T> RetirementQueue<T> {
         self.0.retain(|(serial, _)| *serial > completed);
     }
 }
+impl Upload {
+    pub fn run(
+        ctx: Arc<DeviceContext>,
+        record: impl FnOnce(vk::CommandBuffer),
+    ) -> Result<(), BoxError> {
+        let mut owner = Self {
+            ctx,
+            pool: vk::CommandPool::null(),
+            fence: vk::Fence::null(),
+            submitted: false,
+        };
+        // SAFETY: command pool is owned until fence completion; caller keeps all
+        // resources captured by record alive until this synchronous method returns.
+        unsafe {
+            owner.pool = owner.ctx.device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default().queue_family_index(owner.ctx.family),
+                None,
+            )?;
+            owner.fence = owner
+                .ctx
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let cmd = owner.ctx.device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(owner.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?[0];
+            owner.ctx.device.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            record(cmd);
+            owner.ctx.device.end_command_buffer(cmd)?;
+            let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            owner.ctx.device.queue_submit2(
+                owner.ctx.queue,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&commands)],
+                owner.fence,
+            )?;
+            owner.submitted = true;
+            owner
+                .ctx
+                .device
+                .wait_for_fences(&[owner.fence], true, u64::MAX)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

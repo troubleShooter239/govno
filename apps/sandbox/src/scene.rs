@@ -22,6 +22,7 @@ pub fn cube() -> MeshData {
             vertices.push(Vertex {
                 position: ((normal + tangent * u + bitangent * v) * 0.5).to_array(),
                 normal: normal.to_array(),
+                uv: [(u + 1.0) * 0.5, (v + 1.0) * 0.5],
             });
         }
         indices.extend([start, start + 1, start + 2, start, start + 2, start + 3]);
@@ -45,6 +46,7 @@ pub fn sphere() -> MeshData {
             vertices.push(Vertex {
                 position: normal.to_array(),
                 normal: normal.to_array(),
+                uv: [segment as f32 / SEGMENTS as f32, ring as f32 / RINGS as f32],
             });
         }
     }
@@ -61,6 +63,18 @@ pub fn build(
     renderer: &mut VulkanRenderer,
     smoke: bool,
 ) -> Result<(RenderWorld, usize, Option<MeshHandle>), BoxError> {
+    let mut rgba8 = Vec::new();
+    for y in 0..64 {
+        for x in 0..64 {
+            let value = if (x / 8 + y / 8) % 2 == 0 { 255 } else { 155 };
+            rgba8.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    renderer.set_base_color_texture(&govno_render::TextureData {
+        width: 64,
+        height: 64,
+        rgba8,
+    })?;
     let cube = renderer.upload_mesh(&cube())?;
     let sphere = renderer.upload_mesh(&sphere())?;
     let mut instances = Vec::new();

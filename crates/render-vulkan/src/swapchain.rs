@@ -44,7 +44,7 @@ pub(crate) struct Swapchain {
     pub present_fences: Vec<vk::Fence>,
     pub pending_present: Vec<bool>,
     pub pipeline: ForwardPipeline,
-    pub depth: Vec<crate::memory::DepthImage>,
+    pub depth: Vec<crate::memory::ImageResource>,
     pub srgb_attachment: bool,
 }
 impl Swapchain {
@@ -108,7 +108,7 @@ impl Swapchain {
                 ),
             };
             for _ in 0..2 {
-                chain.depth.push(crate::memory::DepthImage::new(
+                chain.depth.push(crate::memory::ImageResource::new(
                     memory.clone(),
                     extent,
                     depth_format,

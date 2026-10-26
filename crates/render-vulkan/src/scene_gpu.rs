@@ -16,6 +16,8 @@ pub(crate) struct SceneGpu {
     pool: vk::DescriptorPool,
     pub sets: Vec<vk::DescriptorSet>,
     cameras: Vec<Buffer>,
+    texture: Option<crate::texture::Texture>,
+    memory: Rc<Memory>,
 }
 impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
@@ -25,6 +27,8 @@ impl SceneGpu {
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
             cameras: Vec::new(),
+            texture: None,
+            memory: memory.clone(),
         };
         for _ in 0..frames {
             owner.cameras.push(Buffer::new(
@@ -34,11 +38,23 @@ impl SceneGpu {
                 MemoryLocation::CpuToGpu,
             )?);
         }
-        let bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
         // SAFETY: layouts and buffers are kept alive by owner. Descriptor updates
         // occur only at startup, before any queue references these sets.
         unsafe {
@@ -46,9 +62,17 @@ impl SceneGpu {
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
             )?;
-            let sizes = [vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(frames)];
+            let sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(frames),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(frames),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(frames),
+            ];
             owner.pool = owner.ctx.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(frames)
@@ -75,7 +99,43 @@ impl SceneGpu {
                 );
             }
         }
+        owner.set_texture(&govno_render::TextureData {
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        })?;
         Ok(owner)
+    }
+    /// Caller has quiesced all descriptor users before entering this method.
+    pub fn set_texture(&mut self, data: &govno_render::TextureData) -> Result<(), BoxError> {
+        let texture = crate::texture::Texture::new(self.memory.clone(), data)?;
+        let image = [vk::DescriptorImageInfo::default()
+            .image_view(texture.image.view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let sampler = [vk::DescriptorImageInfo::default().sampler(texture.sampler)];
+        for set in &self.sets {
+            // SAFETY: no pending descriptor users; new texture remains owned until
+            // a future quiesced replacement or renderer teardown.
+            unsafe {
+                self.ctx.device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(&image),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(&sampler),
+                    ],
+                    &[],
+                );
+            }
+        }
+        self.texture = Some(texture);
+        Ok(())
     }
     /// Call only after waiting for this frame slot's submission fence.
     pub fn update(

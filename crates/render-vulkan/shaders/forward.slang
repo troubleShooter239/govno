@@ -7,6 +7,9 @@ struct FrameData
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
+[[vk::binding(1, 0)]] Texture2D<float4> baseColorTexture;
+[[vk::binding(2, 0)]] SamplerState baseColorSampler;
+
 struct DrawData
 {
     column_major float4x4 model;
@@ -19,12 +22,14 @@ struct VertexInput
 {
     [[vk::location(0)]] float3 position : POSITION;
     [[vk::location(1)]] float3 normal : NORMAL;
+    [[vk::location(2)]] float2 uv : TEXCOORD0;
 };
 struct VertexOutput
 {
     float4 position : SV_Position;
     float3 worldPosition : TEXCOORD0;
     float3 worldNormal : TEXCOORD1;
+    float2 uv : TEXCOORD2;
 };
 [shader("vertex")]
 VertexOutput vertexMain(VertexInput input)
@@ -35,6 +40,7 @@ VertexOutput vertexMain(VertexInput input)
     output.worldPosition = worldPosition.xyz;
     // For positive TRS scales: model * (normal / scale^2) = inverse-transpose * normal.
     output.worldNormal = mul(draw.model, float4(input.normal * draw.inverseScaleSquaredRoughness.xyz, 0.0)).xyz;
+    output.uv = input.uv;
     return output;
 }
 float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
@@ -57,7 +63,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float nl = saturate(dot(n,l));
     float nh = saturate(dot(n,h));
     float vh = saturate(dot(v,h));
-    float3 base = draw.baseColorMetallic.xyz;
+    float3 base = draw.baseColorMetallic.xyz * baseColorTexture.Sample(baseColorSampler, input.uv).rgb;
     float metal = draw.baseColorMetallic.w;
     float roughness = draw.inverseScaleSquaredRoughness.w;
     float alpha = roughness * roughness;
@@ -78,4 +84,3 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     if (frame.lightRadiance.w > 0.5) color = encodeSRGB(color);
     return float4(color, 1.0);
 }
-

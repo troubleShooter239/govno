@@ -16,6 +16,7 @@ struct GraphicsApp {
     frames: u64,
     animated: usize,
     temporary: Option<MeshHandle>,
+    smoke: bool,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -63,6 +64,18 @@ impl WindowDriver for GraphicsApp {
                 .retain(|instance| instance.mesh != handle);
             self.renderer.remove_mesh(handle)?;
             tracing::info!("smoke: mesh retired after submitted draws");
+        }
+        if self.smoke && self.frames == 40 {
+            self.renderer
+                .set_base_color_texture(&govno_render::TextureData {
+                    width: 2,
+                    height: 2,
+                    rgba8: vec![
+                        255, 255, 255, 255, 155, 155, 155, 255, 155, 155, 155, 255, 255, 255, 255,
+                        255,
+                    ],
+                })?;
+            tracing::info!("smoke: texture replaced after submitted frames");
         }
         let presented = self.renderer.draw(&self.world)? == FrameStatus::Presented;
         if presented {
@@ -134,6 +147,7 @@ fn main() -> Result<(), BoxError> {
                 frames: 0,
                 animated,
                 temporary,
+                smoke,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");

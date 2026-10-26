@@ -148,17 +148,41 @@ impl Drop for Buffer {
     }
 }
 
-pub(crate) struct DepthImage {
+pub(crate) struct ImageResource {
     memory: Rc<Memory>,
     pub image: vk::Image,
     pub view: vk::ImageView,
     allocation: Option<Allocation>,
 }
-impl DepthImage {
+impl ImageResource {
     pub fn new(
         memory: Rc<Memory>,
         extent: vk::Extent2D,
         format: vk::Format,
+    ) -> Result<Self, BoxError> {
+        Self::with_usage(
+            memory,
+            extent,
+            format,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            depth_range(),
+        )
+    }
+    pub fn sampled(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
+        Self::with_usage(
+            memory,
+            extent,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            crate::swapchain::color_range(),
+        )
+    }
+    fn with_usage(
+        memory: Rc<Memory>,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        range: vk::ImageSubresourceRange,
     ) -> Result<Self, BoxError> {
         let mut owner = Self {
             memory,
@@ -166,7 +190,7 @@ impl DepthImage {
             view: vk::ImageView::null(),
             allocation: None,
         };
-        // SAFETY: positive extent and supported D32 format supplied by swapchain;
+        // SAFETY: positive extent and compatible format/usage supplied by the caller;
         // every successful handle is immediately owned for partial failure cleanup.
         unsafe {
             owner.image = owner.memory.ctx.device.create_image(
@@ -182,7 +206,7 @@ impl DepthImage {
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    .usage(usage)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,
@@ -212,16 +236,16 @@ impl DepthImage {
                     .image(owner.image)
                     .view_type(vk::ImageViewType::TYPE_2D)
                     .format(format)
-                    .subresource_range(depth_range()),
+                    .subresource_range(range),
                 None,
             )?;
         }
         Ok(owner)
     }
 }
-impl Drop for DepthImage {
+impl Drop for ImageResource {
     fn drop(&mut self) {
-        // SAFETY: swapchain waits for every submission before releasing depth targets.
+        // SAFETY: resource owner waits for all referring submissions before release.
         unsafe {
             self.memory.ctx.device.destroy_image_view(self.view, None);
             self.memory.ctx.device.destroy_image(self.image, None);

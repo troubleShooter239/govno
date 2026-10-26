@@ -6,6 +6,7 @@ mod mesh;
 mod pipeline;
 mod scene_gpu;
 mod swapchain;
+mod texture;
 use ash::vk;
 use context::DeviceContext;
 pub use context::{SurfaceTarget, ValidationStats};
@@ -75,6 +76,19 @@ impl VulkanRenderer {
         }
         renderer.recreate()?;
         Ok(renderer)
+    }
+    /// Initial API: one shared base-color image for all instances. Synchronous
+    /// replacement is safe during rendering but deliberately waits for GPU users.
+    pub fn set_base_color_texture(
+        &mut self,
+        data: &govno_render::TextureData,
+    ) -> Result<(), BoxError> {
+        data.validate()?;
+        if self.failed {
+            return Err("renderer has failed".into());
+        }
+        self.wait_idle()?;
+        self.scene_gpu.set_texture(data)
     }
     pub fn upload_mesh(&mut self, data: &MeshData) -> Result<MeshHandle, BoxError> {
         if self.failed {
