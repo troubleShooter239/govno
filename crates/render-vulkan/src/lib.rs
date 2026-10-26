@@ -191,7 +191,8 @@ impl VulkanRenderer {
             return Ok(FrameStatus::Skipped);
         }
         world.validate(self.extent)?;
-        self.scene_gpu.prepare(world)?;
+        self.scene_gpu.collect_descriptors(self.completed);
+        self.scene_gpu.prepare(world, self.submitted)?;
         for item in &world.instances {
             self.scene_gpu
                 .descriptors(self.frame_index, &item.material)?;
@@ -231,6 +232,7 @@ impl VulkanRenderer {
             device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
             self.completed = self.completed.max(frame.serial);
             self.retired.collect(self.completed);
+            self.scene_gpu.collect_descriptors(self.completed);
             self.scene_gpu.update(
                 self.frame_index,
                 world,
@@ -334,6 +336,7 @@ impl VulkanRenderer {
         self.ctx.wait_idle()?;
         self.completed = self.submitted;
         self.retired.collect(self.completed);
+        self.scene_gpu.collect_descriptors(self.completed);
         Ok(())
     }
 }

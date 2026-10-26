@@ -27,6 +27,7 @@ pub(crate) struct SceneGpu {
         ),
         ExtraSet,
     >,
+    retired_extras: crate::mesh::RetirementQueue<ExtraSet>,
     memory: Rc<Memory>,
     textures: std::collections::HashMap<govno_render::TextureHandle, TextureSlot>,
 }
@@ -42,6 +43,7 @@ impl SceneGpu {
             cameras: Vec::new(),
             texture: None,
             extras: Default::default(),
+            retired_extras: Default::default(),
             memory: memory.clone(),
             textures: Default::default(),
         };
@@ -240,39 +242,40 @@ impl Drop for SceneGpu {
         }
     }
 }
-pub(crate) fn draw_constants(instance: &DrawInstance) -> Vec<u8> {
-    let mut data = instance.transform.matrix().to_cols_array().to_vec();
+pub(crate) fn draw_constants(instance: &DrawInstance) -> [u8; DRAW_BYTES as usize] {
+    let mut data = [0.0; 32];
+    data[..16].copy_from_slice(&instance.transform.matrix().to_cols_array());
     let inverse_scale_squared = (instance.transform.scale * instance.transform.scale).recip();
-    data.extend_from_slice(
+    data[16..20].copy_from_slice(
         &inverse_scale_squared
             .extend(instance.material.roughness)
             .to_array(),
     );
-    data.extend_from_slice(
+    data[20..24].copy_from_slice(
         &instance
             .material
             .base_color
             .extend(instance.material.metallic)
             .to_array(),
     );
-    data.extend_from_slice(&[
-        instance.material.normal_scale,
-        if instance.material.normal_texture.is_some() {
-            1.0
-        } else {
-            0.0
-        },
-        0.0,
-        0.0,
-    ]);
-    data.extend_from_slice(
+    data[24] = instance.material.normal_scale;
+    data[25] = if instance.material.normal_texture.is_some() {
+        1.0
+    } else {
+        0.0
+    };
+    data[28..32].copy_from_slice(
         &instance
             .material
             .emissive
             .extend(instance.material.occlusion_strength)
             .to_array(),
     );
-    floats(&data)
+    let mut bytes = [0; DRAW_BYTES as usize];
+    for (destination, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(data) {
+        destination.copy_from_slice(&value.to_ne_bytes());
+    }
+    bytes
 }
 fn floats(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_ne_bytes()).collect()
@@ -459,6 +462,7 @@ impl SceneGpu {
             return Err("reserved fallback texture".into());
         }
         self.extras.clear();
+        self.retired_extras.collect(u64::MAX);
         self.textures
             .remove(&handle)
             .ok_or("unknown or removed texture handle")?;
@@ -467,26 +471,43 @@ impl SceneGpu {
 }
 
 struct ExtraSet {
+    used: bool,
     ctx: Arc<DeviceContext>,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
 }
 impl Drop for ExtraSet {
     fn drop(&mut self) {
-        // SAFETY: immutable sets are released only after renderer quiescence.
+        // SAFETY: sets are released after their last submission completes, or after quiescence.
         unsafe {
             self.ctx.device.destroy_descriptor_pool(self.pool, None);
         }
     }
 }
 impl SceneGpu {
-    pub fn prepare(&mut self, world: &RenderWorld) -> Result<(), BoxError> {
+    pub fn collect_descriptors(&mut self, completed: u64) {
+        self.retired_extras.collect(completed);
+    }
+    pub fn prepare(&mut self, world: &RenderWorld, submitted: u64) -> Result<(), BoxError> {
+        for entry in self.extras.values_mut() {
+            entry.used = false;
+        }
+        let result = self.prepare_materials(world);
+        // Retire unused pools even if preparing a later material failed.
+        // Earlier single-queue submissions may still reference these sets.
+        for (_, entry) in self.extras.extract_if(|_, entry| !entry.used) {
+            self.retired_extras.retire(submitted, entry);
+        }
+        result
+    }
+    fn prepare_materials(&mut self, world: &RenderWorld) -> Result<(), BoxError> {
         for item in &world.instances {
             let key = (
                 item.material.emissive_texture,
                 item.material.occlusion_texture,
             );
-            if self.extras.contains_key(&key) {
+            if let Some(entry) = self.extras.get_mut(&key) {
+                entry.used = true;
                 continue;
             }
             let emission = &self
@@ -507,6 +528,7 @@ impl SceneGpu {
                 ._texture;
             let frames = self.cameras.len() as u32;
             let mut owner = ExtraSet {
+                used: true,
                 ctx: self.ctx.clone(),
                 pool: vk::DescriptorPool::null(),
                 sets: Vec::new(),

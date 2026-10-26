@@ -119,6 +119,19 @@ impl WindowDriver for GraphicsApp {
             self.world.point_lights[1].range = 5.0;
             tracing::info!("smoke: point light position/range updated");
         }
+        // Alternate material keys while previous frames may still use their pools.
+        if self.smoke && (61..=64).contains(&self.frames) {
+            let material = &mut self.world.instances[self.animated].material;
+            material.emissive_texture = if self.frames % 2 == 1 {
+                material.base_color_texture
+            } else {
+                None
+            };
+            tracing::info!(
+                frame = self.frames,
+                "smoke: material descriptor key changed"
+            );
+        }
         if self.smoke && self.frames == 77 {
             let mut dark = self.world.point_lights[0];
             dark.intensity = Vec3::ZERO;

@@ -66,7 +66,11 @@ impl Camera {
             self.near,
         );
         let view = glam::camera::rh::view::look_to_mat4(self.position, self.forward(), Vec3::Y);
-        Ok(projection * view)
+        let matrix = projection * view;
+        if !matrix.is_finite() {
+            return Err("camera view-projection exceeds finite f32 range".into());
+        }
+        Ok(matrix)
     }
 }
 #[cfg(test)]
@@ -128,6 +132,21 @@ mod tests {
                     height: 100
                 })
                 .is_ok()
+        );
+    }
+    #[test]
+    fn projection_overflow_is_rejected() {
+        let camera = Camera {
+            vertical_fov: f32::from_bits(1),
+            ..camera()
+        };
+        assert!(
+            camera
+                .view_projection(RenderExtent {
+                    width: 1280,
+                    height: 720
+                })
+                .is_err()
         );
     }
     #[test]

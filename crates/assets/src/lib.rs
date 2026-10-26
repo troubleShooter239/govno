@@ -17,8 +17,32 @@ pub struct ImportedPrimitive {
     pub metallic_roughness_texture: Option<(TextureData, govno_render::TextureSampling)>,
 }
 pub fn load_gltf(path: impl AsRef<Path>) -> Result<Vec<ImportedPrimitive>, BoxError> {
-    let (document, buffers, images) = gltf::import(path)?;
+    let path = path.as_ref();
+    let gltf::Gltf { document, blob } = gltf::Gltf::open(path)?;
+    let base = path.parent();
+    let buffers = gltf::import_buffers(&document, base, blob)?;
+    validate_buffer_views(&document, &buffers)?;
+    let images = gltf::import_images(&document, base, &buffers)?;
     decode(document, buffers, images)
+}
+// The dependency slices image views directly. Check all ranges before decoding.
+fn validate_buffer_views(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Result<(), BoxError> {
+    for view in document.views() {
+        let buffer = buffers
+            .get(view.buffer().index())
+            .ok_or("missing glTF buffer")?;
+        let end = view
+            .offset()
+            .checked_add(view.length())
+            .ok_or("glTF buffer view range overflow")?;
+        if end > view.buffer().length() || buffer.0.get(view.offset()..end).is_none() {
+            return Err(format!("glTF buffer view {} exceeds its buffer", view.index()).into());
+        }
+    }
+    Ok(())
 }
 fn decode(
     document: gltf::Document,
@@ -300,6 +324,30 @@ fn decode_sampler(sampler: gltf::texture::Sampler<'_>) -> govno_render::TextureS
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_buffer_view_out_of_bounds_returns_error() {
+        let error = load_gltf(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/out-of-bounds-image.gltf"
+        ))
+        .err()
+        .expect("invalid image range must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("buffer view 0 exceeds its buffer")
+        );
+    }
+    #[test]
+    fn buffer_view_addition_overflow_returns_error() {
+        let source = format!(
+            r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"byteLength":4}}],"bufferViews":[{{"buffer":0,"byteOffset":{},"byteLength":8}}]}}"#,
+            usize::MAX - 3
+        );
+        let document = gltf::Gltf::from_slice(source.as_bytes()).unwrap().document;
+        let buffers = vec![gltf::buffer::Data(vec![0; 4])];
+        assert!(validate_buffer_views(&document, &buffers).is_err());
+    }
     fn modified(source: &str) -> Result<Vec<ImportedPrimitive>, BoxError> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/triangle.gltf");
         let (_, buffers, images) = gltf::import(path)?;

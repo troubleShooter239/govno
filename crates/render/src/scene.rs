@@ -84,6 +84,9 @@ impl Transform {
             || (self.rotation.length_squared() - 1.0).abs() > 0.001
             || !self.scale.is_finite()
             || self.scale.min_element() < 0.0001
+            || !(self.scale * self.scale).is_finite()
+            || !(self.scale * self.scale).recip().is_finite()
+            || !self.matrix().is_finite()
         {
             return Err(
                 "transform needs finite TRS, unit quaternion and positive nonzero scale".into(),
@@ -215,6 +218,17 @@ mod tests {
         assert!(mesh.validate().is_ok());
         mesh.vertices[0].normal = [0.0; 3];
         assert!(mesh.validate().is_err());
+    }
+    #[test]
+    fn overflowing_normal_transform_is_rejected() {
+        let mut transform = Transform {
+            scale: Vec3::splat(1e20),
+            ..Default::default()
+        };
+        assert!(transform.validate().is_err());
+        transform.scale = Vec3::splat(1e10);
+        assert!(transform.validate().is_ok());
+        assert!((transform.scale * transform.scale).recip().is_finite());
     }
     #[test]
     fn singular_transform_and_invalid_material_are_rejected() {

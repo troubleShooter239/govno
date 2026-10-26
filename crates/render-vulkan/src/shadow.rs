@@ -152,11 +152,12 @@ impl ShadowMap {
             if let Some(matrix) = matrix {
                 for instance in &world.instances {
                     let mesh = meshes.get(&instance.mesh).ok_or("unknown shadow mesh")?;
-                    let bytes: Vec<u8> = (matrix * instance.transform.matrix())
-                        .to_cols_array()
-                        .iter()
-                        .flat_map(|v| v.to_ne_bytes())
-                        .collect();
+                    let matrix = (matrix * instance.transform.matrix()).to_cols_array();
+                    let mut bytes = [0; 64];
+                    for (destination, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix)
+                    {
+                        destination.copy_from_slice(&value.to_ne_bytes());
+                    }
                     device.cmd_push_constants(
                         command,
                         self.pipeline.layout,
