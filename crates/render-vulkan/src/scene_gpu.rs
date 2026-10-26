@@ -8,7 +8,7 @@ use govno_render::{DrawInstance, RenderExtent, RenderWorld};
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
-pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80;
+pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144;
 pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
     pub shadow: crate::shadow::ShadowMap,
@@ -594,7 +594,7 @@ fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>,
         data.extend_from_slice(&light.position.extend(light.range).to_array());
         data.extend_from_slice(&light.intensity.extend(0.0).to_array());
     }
-    data.resize((CAMERA_BYTES as usize - 80) / 4, 0.0);
+    data.resize((112 + 32 * govno_render::MAX_POINT_LIGHTS) / 4, 0.0);
     let matrix = match world.directional_shadow {
         Some(shadow) => shadow.view_projection(world.light_direction)?,
         None => glam::Mat4::IDENTITY,
@@ -610,6 +610,14 @@ fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>,
         0.0,
         0.0,
     ]);
+    let black = [glam::Vec3::ZERO; 9];
+    let coefficients = world
+        .diffuse_environment
+        .as_ref()
+        .map_or(&black, |environment| environment.coefficients());
+    for coefficient in coefficients {
+        data.extend_from_slice(&coefficient.extend(0.0).to_array());
+    }
     Ok(floats(&data))
 }
 #[cfg(test)]
@@ -620,6 +628,7 @@ mod light_abi_tests {
         let mut world = RenderWorld {
             post_process: Default::default(),
             directional_shadow: None,
+            diffuse_environment: None,
             camera: Default::default(),
             light_direction: glam::Vec3::Y,
             light_radiance: glam::Vec3::splat(4.0),
@@ -639,7 +648,8 @@ mod light_abi_tests {
         };
         let bytes = frame_constants(&world, extent).unwrap();
         let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 704);
+        assert_eq!(bytes.len(), 848);
+        assert!(bytes[704..].iter().all(|&b| b == 0));
         assert_eq!(value(108), 16.0);
         for index in 0..govno_render::MAX_POINT_LIGHTS {
             for (component, expected) in [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 0.0]
@@ -652,6 +662,23 @@ mod light_abi_tests {
         world.point_lights.clear();
         let bytes = frame_constants(&world, extent).unwrap();
         assert!(bytes[108..624].iter().all(|&b| b == 0));
+        world.diffuse_environment = Some(
+            govno_render::DiffuseEnvironment::constant(glam::Vec3::new(0.1, 0.2, 1.5)).unwrap(),
+        );
+        let bytes = frame_constants(&world, extent).unwrap();
+        for (i, coefficient) in world
+            .diffuse_environment
+            .as_ref()
+            .unwrap()
+            .coefficients()
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                &bytes[704 + 16 * i..720 + 16 * i],
+                floats(&coefficient.extend(0.0).to_array())
+            );
+        }
         let shadow = govno_render::DirectionalShadow::default();
         world.directional_shadow = Some(shadow);
         let bytes = frame_constants(&world, extent).unwrap();

@@ -216,6 +216,7 @@ pub fn build(
     let world = RenderWorld {
         post_process: Default::default(),
         directional_shadow: Some(Default::default()),
+        diffuse_environment: Some(diffuse_environment()?),
         camera: Camera {
             position: Vec3::new(0.0, 3.3, 10.0),
             pitch: -0.23,
@@ -275,4 +276,19 @@ pub fn point_lights() -> Vec<govno_render::PointLight> {
             range: 7.0,
         },
     ]
+}
+
+pub fn diffuse_environment() -> Result<govno_render::DiffuseEnvironment, BoxError> {
+    // An authored linear HDR sky/ground panorama; no external asset dependency.
+    let mut pixels = Vec::new();
+    for y in 0..32 {
+        let elevation = ((y as f32 + 0.5) / 32.0 * std::f32::consts::PI).cos();
+        let radiance = if elevation > 0.0 {
+            Vec3::new(0.08, 0.12, 0.2).lerp(Vec3::new(0.2, 0.32, 0.55), elevation)
+        } else {
+            Vec3::new(0.03, 0.025, 0.02)
+        };
+        pixels.extend(vec![radiance; 64]);
+    }
+    govno_render::DiffuseEnvironment::from_equirectangular(64, 32, &pixels)
 }

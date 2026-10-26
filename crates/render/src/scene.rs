@@ -140,6 +140,7 @@ pub struct DrawInstance {
 pub struct RenderWorld {
     pub post_process: crate::PostProcessSettings,
     pub directional_shadow: Option<crate::DirectionalShadow>,
+    pub diffuse_environment: Option<crate::DiffuseEnvironment>,
     pub camera: Camera,
     /// Direction from a surface toward the light, not the direction of propagation.
     pub light_direction: Vec3,
@@ -150,6 +151,9 @@ pub struct RenderWorld {
 impl RenderWorld {
     pub fn validate(&self, extent: RenderExtent) -> Result<(), BoxError> {
         self.post_process.validate()?;
+        if let Some(environment) = &self.diffuse_environment {
+            environment.validate()?;
+        }
         if let Some(shadow) = self.directional_shadow {
             shadow.view_projection(self.light_direction)?;
         }

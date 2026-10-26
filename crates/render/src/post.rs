@@ -42,6 +42,7 @@ mod tests {
             let world = crate::RenderWorld {
                 post_process: PostProcessSettings { exposure_ev: ev },
                 directional_shadow: None,
+                diffuse_environment: None,
                 camera: Default::default(),
                 light_direction: glam::Vec3::Y,
                 light_radiance: glam::Vec3::ONE,

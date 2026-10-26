@@ -1,5 +1,7 @@
 //! Renderer-facing CPU data. No Vulkan, window, or ECS dependencies.
 mod camera;
+mod environment;
+pub use environment::DiffuseEnvironment;
 mod light;
 pub use light::{MAX_POINT_LIGHTS, PointLight};
 mod post;

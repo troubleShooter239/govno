@@ -18,6 +18,7 @@ struct GraphicsApp {
     temporary: Option<MeshHandle>,
     smoke: bool,
     shadows: bool,
+    environment: bool,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -78,6 +79,22 @@ impl WindowDriver for GraphicsApp {
                     ],
                 })?;
             tracing::info!("smoke: texture replaced after submitted frames");
+        }
+        if self.smoke && self.environment {
+            if self.frames == 26 {
+                self.world.diffuse_environment = None;
+                tracing::info!("smoke: diffuse environment disabled");
+            }
+            if self.frames == 28 {
+                self.world.diffuse_environment = Some(govno_render::DiffuseEnvironment::constant(
+                    Vec3::new(0.05, 0.1, 0.2),
+                )?);
+                tracing::info!("smoke: constant HDR environment enabled");
+            }
+            if self.frames == 32 {
+                self.world.diffuse_environment = Some(scene::diffuse_environment()?);
+                tracing::info!("smoke: projected panorama environment restored");
+            }
         }
         if self.smoke && self.shadows {
             if self.frames == 22 {
@@ -167,6 +184,7 @@ fn main() -> Result<(), BoxError> {
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
     let mut shadows = true;
+    let mut environment = true;
     let mut post_process = govno_render::PostProcessSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -190,12 +208,13 @@ fn main() -> Result<(), BoxError> {
             }
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
             "--no-shadows" => shadows = false,
+            "--no-environment" => environment = false,
             "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--frames N] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--no-environment] [--frames N] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -262,6 +281,9 @@ fn main() -> Result<(), BoxError> {
                 }
             }
             world.post_process = post_process;
+            if !environment {
+                world.diffuse_environment = None;
+            }
             if !shadows {
                 world.directional_shadow = None;
             }
@@ -277,6 +299,7 @@ fn main() -> Result<(), BoxError> {
                 temporary,
                 smoke,
                 shadows,
+                environment,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");

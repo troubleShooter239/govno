@@ -8,6 +8,7 @@ struct FrameData
     PointLightData pointLights[16];
     column_major float4x4 shadowViewProjection;
     float4 shadowParams; // x receiver bias, y enabled
+    float4 diffuseSH[9]; // cosine-convolved irradiance/pi
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
@@ -81,6 +82,15 @@ float directionalVisibility(float3 position)
     }
     return visible / 9.0;
 }
+float3 diffuseEnvironment(float3 n)
+{
+    float basis[9] = { 0.2820948,0.48860252*n.y,0.48860252*n.z,0.48860252*n.x,
+        1.0925485*n.x*n.y,1.0925485*n.y*n.z,0.31539157*(3.0*n.z*n.z-1.0),
+        1.0925485*n.x*n.z,0.54627424*(n.x*n.x-n.y*n.y) };
+    float3 irradianceOverPi = float3(0.0);
+    for (uint i=0; i<9; ++i) irradianceOverPi += frame.diffuseSH[i].rgb * basis[i];
+    return max(irradianceOverPi,0.0);
+}
 float3 directLight(float3 n, float3 v, float3 l, float3 base, float metal, float roughness, float3 radiance)
 {
     const float PI = 3.14159265359;
@@ -150,9 +160,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
         float attenuation = window * window / max(distanceSquared,0.01);
         color += directLight(n,v,safeNormalize(delta),base,metal,roughness,light.intensity.rgb * attenuation);
     }
-    // Temporary ambient fill; no IBL. Directional shadows affect direct light only.
+    // Diffuse-only IBL. Directional shadows affect direct light only.
     float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
-    color += base * 0.025 * (1.0-metal) * ao;
+    float3 f0 = lerp(float3(0.04),base,metal);
+    float3 ambientFresnel = f0 + (1.0-f0) * pow(1.0-saturate(dot(n,v)),5.0);
+    color += (1.0-ambientFresnel) * (1.0-metal) * base * diffuseEnvironment(n) * ao;
     color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;
 
 
