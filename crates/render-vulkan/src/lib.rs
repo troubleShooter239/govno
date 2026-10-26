@@ -7,6 +7,7 @@ mod pipeline;
 mod post;
 mod scene_gpu;
 mod shadow;
+mod specular;
 mod swapchain;
 mod texture;
 use ash::vk;
@@ -94,6 +95,17 @@ impl VulkanRenderer {
         }
         self.wait_idle()?;
         self.scene_gpu.set_texture(data)
+    }
+    /// Replace the one global prefiltered environment; synchronous load-time API.
+    pub fn set_specular_environment(
+        &mut self,
+        data: &govno_render::SpecularEnvironment,
+    ) -> Result<(), BoxError> {
+        if self.failed {
+            return Err("renderer has failed".into());
+        }
+        self.wait_idle()?;
+        self.scene_gpu.set_specular_environment(data)
     }
     pub fn upload_texture(
         &mut self,

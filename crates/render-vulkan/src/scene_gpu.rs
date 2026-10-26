@@ -8,10 +8,12 @@ use govno_render::{DrawInstance, RenderExtent, RenderWorld};
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
-pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144;
+pub(crate) const CAMERA_BYTES: u64 =
+    112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144 + 16;
 pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
     pub shadow: crate::shadow::ShadowMap,
+    specular: crate::specular::SpecularGpu,
     ctx: Arc<DeviceContext>,
     pub layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -32,6 +34,7 @@ impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
         let mut owner = Self {
             shadow: crate::shadow::ShadowMap::new(memory.clone())?,
+            specular: crate::specular::SpecularGpu::new(memory.clone())?,
             ctx: memory.ctx.clone(),
             layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
@@ -51,6 +54,21 @@ impl SceneGpu {
             )?);
         }
         let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(7)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(8)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(5)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
@@ -95,10 +113,10 @@ impl SceneGpu {
                     .descriptor_count(frames),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(frames * 3),
+                    .descriptor_count(frames * 5),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(frames * 2),
+                    .descriptor_count(frames * 3),
             ];
             owner.pool = owner.ctx.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -127,6 +145,7 @@ impl SceneGpu {
             }
         }
         owner.shadow.bind_images(&owner.sets);
+        owner.specular.bind(&owner.sets);
         owner.set_texture(&govno_render::TextureData {
             color_space: Default::default(),
             width: 1,
@@ -156,6 +175,17 @@ impl SceneGpu {
             Default::default(),
         )?;
         Ok(owner)
+    }
+    pub fn set_specular_environment(
+        &mut self,
+        data: &govno_render::SpecularEnvironment,
+    ) -> Result<(), BoxError> {
+        self.specular.replace(data)?;
+        self.specular.bind(&self.sets);
+        for slot in self.textures.values() {
+            self.specular.bind(&slot.sets);
+        }
+        Ok(())
     }
     /// Caller has quiesced all descriptor users before entering this method.
     pub fn set_texture(&mut self, data: &govno_render::TextureData) -> Result<(), BoxError> {
@@ -292,9 +322,9 @@ impl SceneGpu {
                     if ty == vk::DescriptorType::UNIFORM_BUFFER {
                         frames
                     } else if ty == vk::DescriptorType::SAMPLED_IMAGE {
-                        frames * 3
+                        frames * 5
                     } else {
-                        frames * 2
+                        frames * 3
                     },
                 )
             });
@@ -341,6 +371,7 @@ impl SceneGpu {
             }
         }
         self.shadow.bind_images(&slot.sets);
+        self.specular.bind(&slot.sets);
         self.textures.insert(handle, slot);
         Ok(())
     }
@@ -489,10 +520,10 @@ impl SceneGpu {
                         .descriptor_count(frames),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .descriptor_count(frames * 3),
+                        .descriptor_count(frames * 5),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::SAMPLER)
-                        .descriptor_count(frames * 2),
+                        .descriptor_count(frames * 3),
                 ];
                 owner.pool = self.ctx.device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
@@ -618,6 +649,12 @@ fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>,
     for coefficient in coefficients {
         data.extend_from_slice(&coefficient.extend(0.0).to_array());
     }
+    data.extend_from_slice(&[
+        if world.specular_environment { 1.0 } else { 0.0 },
+        0.0,
+        0.0,
+        0.0,
+    ]);
     Ok(floats(&data))
 }
 #[cfg(test)]
@@ -629,6 +666,7 @@ mod light_abi_tests {
             post_process: Default::default(),
             directional_shadow: None,
             diffuse_environment: None,
+            specular_environment: false,
             camera: Default::default(),
             light_direction: glam::Vec3::Y,
             light_radiance: glam::Vec3::splat(4.0),
@@ -648,7 +686,7 @@ mod light_abi_tests {
         };
         let bytes = frame_constants(&world, extent).unwrap();
         let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 848);
+        assert_eq!(bytes.len(), 864);
         assert!(bytes[704..].iter().all(|&b| b == 0));
         assert_eq!(value(108), 16.0);
         for index in 0..govno_render::MAX_POINT_LIGHTS {
@@ -679,6 +717,9 @@ mod light_abi_tests {
                 floats(&coefficient.extend(0.0).to_array())
             );
         }
+        world.specular_environment = true;
+        let bytes = frame_constants(&world, extent).unwrap();
+        assert_eq!(f32::from_ne_bytes(bytes[848..852].try_into().unwrap()), 1.0);
         let shadow = govno_render::DirectionalShadow::default();
         world.directional_shadow = Some(shadow);
         let bytes = frame_constants(&world, extent).unwrap();

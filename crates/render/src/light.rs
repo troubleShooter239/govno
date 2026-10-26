@@ -35,6 +35,7 @@ mod tests {
             post_process: Default::default(),
             directional_shadow: None,
             diffuse_environment: None,
+            specular_environment: false,
             camera: Default::default(),
             light_direction: Vec3::Y,
             light_radiance: Vec3::ONE,

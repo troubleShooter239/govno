@@ -7,12 +7,17 @@ pub use light::{MAX_POINT_LIGHTS, PointLight};
 mod post;
 mod scene;
 mod shadow;
+mod specular;
 pub use camera::Camera;
 pub use post::PostProcessSettings;
 pub use scene::{
     DrawInstance, Material, MeshData, MeshHandle, RenderWorld, TextureHandle, Transform, Vertex,
 };
 pub use shadow::DirectionalShadow;
+pub use specular::{
+    BRDF_LUT_SIZE, SPECULAR_HEIGHT, SPECULAR_LEVELS, SPECULAR_WIDTH, SpecularEnvironment,
+    specular_brdf_lut,
+};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderExtent {
     pub width: u32,

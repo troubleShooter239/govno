@@ -141,6 +141,7 @@ pub struct RenderWorld {
     pub post_process: crate::PostProcessSettings,
     pub directional_shadow: Option<crate::DirectionalShadow>,
     pub diffuse_environment: Option<crate::DiffuseEnvironment>,
+    pub specular_environment: bool,
     pub camera: Camera,
     /// Direction from a surface toward the light, not the direction of propagation.
     pub light_direction: Vec3,

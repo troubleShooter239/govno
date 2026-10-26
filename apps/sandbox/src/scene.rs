@@ -213,10 +213,13 @@ pub fn build(
     } else {
         None
     };
+    let environment = environment()?;
+    renderer.set_specular_environment(&environment)?;
     let world = RenderWorld {
         post_process: Default::default(),
         directional_shadow: Some(Default::default()),
-        diffuse_environment: Some(diffuse_environment()?),
+        diffuse_environment: Some(environment.diffuse().clone()),
+        specular_environment: true,
         camera: Camera {
             position: Vec3::new(0.0, 3.3, 10.0),
             pitch: -0.23,
@@ -278,7 +281,7 @@ pub fn point_lights() -> Vec<govno_render::PointLight> {
     ]
 }
 
-pub fn diffuse_environment() -> Result<govno_render::DiffuseEnvironment, BoxError> {
+pub fn environment() -> Result<govno_render::SpecularEnvironment, BoxError> {
     // An authored linear HDR sky/ground panorama; no external asset dependency.
     let mut pixels = Vec::new();
     for y in 0..32 {
@@ -290,5 +293,5 @@ pub fn diffuse_environment() -> Result<govno_render::DiffuseEnvironment, BoxErro
         };
         pixels.extend(vec![radiance; 64]);
     }
-    govno_render::DiffuseEnvironment::from_equirectangular(64, 32, &pixels)
+    govno_render::SpecularEnvironment::from_equirectangular(64, 32, &pixels)
 }

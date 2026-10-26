@@ -9,9 +9,13 @@ struct FrameData
     column_major float4x4 shadowViewProjection;
     float4 shadowParams; // x receiver bias, y enabled
     float4 diffuseSH[9]; // cosine-convolved irradiance/pi
+    float4 environmentParams; // x specular enabled
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
+[[vk::binding(6, 0)]] Texture2D<float4> specularAtlas;
+[[vk::binding(7, 0)]] SamplerState environmentSampler;
+[[vk::binding(8, 0)]] Texture2D<float4> brdfLut;
 [[vk::binding(5, 0)]] Texture2D<float> shadowMap;
 [[vk::binding(1, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(2, 0)]] SamplerState baseColorSampler;
@@ -91,6 +95,20 @@ float3 diffuseEnvironment(float3 n)
     for (uint i=0; i<9; ++i) irradianceOverPi += frame.diffuseSH[i].rgb * basis[i];
     return max(irradianceOverPi,0.0);
 }
+float3 specularEnvironment(float3 n, float3 v, float roughness, float3 f0)
+{
+    if (frame.environmentParams.x < 0.5) return float3(0.0);
+    float3 r = reflect(-v,n);
+    float u = frac(atan2(r.z,r.x) / 6.28318530718);
+    float latitude = clamp(acos(clamp(r.y,-1.0,1.0))/3.14159265359,0.5/32.0,1.0-0.5/32.0);
+    float level = roughness*5.0;
+    float low = floor(level), high = min(low+1.0,5.0);
+    float3 radiance = lerp(specularAtlas.SampleLevel(environmentSampler,float2(u,(low+latitude)/6.0),0.0).rgb,
+        specularAtlas.SampleLevel(environmentSampler,float2(u,(high+latitude)/6.0),0.0).rgb,frac(level));
+    float2 lutUV = clamp(float2(saturate(dot(n,v)),roughness),float2(0.5/64.0),float2(1.0-0.5/64.0));
+    float2 dfg = brdfLut.SampleLevel(environmentSampler,lutUV,0.0).rg;
+    return radiance*(f0*dfg.x+dfg.y);
+}
 float3 directLight(float3 n, float3 v, float3 l, float3 base, float metal, float roughness, float3 radiance)
 {
     const float PI = 3.14159265359;
@@ -164,6 +182,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
     float3 f0 = lerp(float3(0.04),base,metal);
     float3 ambientFresnel = f0 + (1.0-f0) * pow(1.0-saturate(dot(n,v)),5.0);
+    color += specularEnvironment(n,v,roughness,f0);
     color += (1.0-ambientFresnel) * (1.0-metal) * base * diffuseEnvironment(n) * ao;
     color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;
 

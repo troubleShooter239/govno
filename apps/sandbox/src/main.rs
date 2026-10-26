@@ -19,6 +19,7 @@ struct GraphicsApp {
     smoke: bool,
     shadows: bool,
     environment: bool,
+    specular: bool,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -83,16 +84,22 @@ impl WindowDriver for GraphicsApp {
         if self.smoke && self.environment {
             if self.frames == 26 {
                 self.world.diffuse_environment = None;
+                self.world.specular_environment = false;
                 tracing::info!("smoke: diffuse environment disabled");
             }
             if self.frames == 28 {
-                self.world.diffuse_environment = Some(govno_render::DiffuseEnvironment::constant(
-                    Vec3::new(0.05, 0.1, 0.2),
-                )?);
+                let environment =
+                    govno_render::SpecularEnvironment::constant(Vec3::new(0.05, 0.1, 0.2))?;
+                self.renderer.set_specular_environment(&environment)?;
+                self.world.diffuse_environment = Some(environment.diffuse().clone());
+                self.world.specular_environment = self.specular;
                 tracing::info!("smoke: constant HDR environment enabled");
             }
             if self.frames == 32 {
-                self.world.diffuse_environment = Some(scene::diffuse_environment()?);
+                let environment = scene::environment()?;
+                self.renderer.set_specular_environment(&environment)?;
+                self.world.diffuse_environment = Some(environment.diffuse().clone());
+                self.world.specular_environment = self.specular;
                 tracing::info!("smoke: projected panorama environment restored");
             }
         }
@@ -185,6 +192,7 @@ fn main() -> Result<(), BoxError> {
     let mut gltf_path = None;
     let mut shadows = true;
     let mut environment = true;
+    let mut specular = true;
     let mut post_process = govno_render::PostProcessSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -209,12 +217,13 @@ fn main() -> Result<(), BoxError> {
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
             "--no-shadows" => shadows = false,
             "--no-environment" => environment = false,
+            "--no-specular" => specular = false,
             "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--no-environment] [--frames N] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--frames N] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -281,8 +290,10 @@ fn main() -> Result<(), BoxError> {
                 }
             }
             world.post_process = post_process;
+            world.specular_environment = environment && specular;
             if !environment {
                 world.diffuse_environment = None;
+                world.specular_environment = false;
             }
             if !shadows {
                 world.directional_shadow = None;
@@ -300,6 +311,7 @@ fn main() -> Result<(), BoxError> {
                 smoke,
                 shadows,
                 environment,
+                specular,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");
