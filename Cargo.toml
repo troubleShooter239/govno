@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/runtime", "apps/sandbox"]
+members = ["crates/core", "crates/runtime", "apps/sandbox", "crates/platform", "crates/render", "crates/render-vulkan"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,15 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+glam = "0.34"
+gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
+govno-platform = { path = "crates/platform" }
+govno-render = { path = "crates/render" }
+govno-render-vulkan = { path = "crates/render-vulkan" }
+ash = "0.38"
+ash-window = "0.13"
+winit = "0.30"
+raw-window-handle = { version = "0.6", features = ["std"] }
 govno-core = { path = "crates/core" }
 govno-runtime = { path = "crates/runtime" }
 tracing = "0.1"
@@ -18,4 +27,3 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
-

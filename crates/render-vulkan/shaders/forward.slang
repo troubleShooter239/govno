@@ -1,0 +1,81 @@
+struct FrameData
+{
+    column_major float4x4 viewProjection;
+    float4 cameraPosition;
+    float4 lightDirection;
+    float4 lightRadiance; // w = manually encode sRGB for UNORM swapchains
+};
+[[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
+
+struct DrawData
+{
+    column_major float4x4 model;
+    float4 inverseScaleSquaredRoughness;
+    float4 baseColorMetallic;
+};
+[[vk::push_constant]] ConstantBuffer<DrawData> draw;
+
+struct VertexInput
+{
+    [[vk::location(0)]] float3 position : POSITION;
+    [[vk::location(1)]] float3 normal : NORMAL;
+};
+struct VertexOutput
+{
+    float4 position : SV_Position;
+    float3 worldPosition : TEXCOORD0;
+    float3 worldNormal : TEXCOORD1;
+};
+[shader("vertex")]
+VertexOutput vertexMain(VertexInput input)
+{
+    VertexOutput output;
+    float4 worldPosition = mul(draw.model, float4(input.position, 1.0));
+    output.position = mul(frame.viewProjection, worldPosition);
+    output.worldPosition = worldPosition.xyz;
+    // For positive TRS scales: model * (normal / scale^2) = inverse-transpose * normal.
+    output.worldNormal = mul(draw.model, float4(input.normal * draw.inverseScaleSquaredRoughness.xyz, 0.0)).xyz;
+    return output;
+}
+float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
+float3 encodeSRGB(float3 color)
+{
+    return float3(
+        color.x <= 0.0031308 ? 12.92 * color.x : 1.055 * pow(color.x, 1.0/2.4) - 0.055,
+        color.y <= 0.0031308 ? 12.92 * color.y : 1.055 * pow(color.y, 1.0/2.4) - 0.055,
+        color.z <= 0.0031308 ? 12.92 * color.z : 1.055 * pow(color.z, 1.0/2.4) - 0.055);
+}
+[shader("fragment")]
+float4 fragmentMain(VertexOutput input) : SV_Target0
+{
+    const float PI = 3.14159265359;
+    float3 n = safeNormalize(input.worldNormal);
+    float3 v = safeNormalize(frame.cameraPosition.xyz - input.worldPosition);
+    float3 l = frame.lightDirection.xyz;
+    float3 h = safeNormalize(v + l);
+    float nv = max(dot(n,v), 0.0001);
+    float nl = saturate(dot(n,l));
+    float nh = saturate(dot(n,h));
+    float vh = saturate(dot(v,h));
+    float3 base = draw.baseColorMetallic.xyz;
+    float metal = draw.baseColorMetallic.w;
+    float roughness = draw.inverseScaleSquaredRoughness.w;
+    float alpha = roughness * roughness;
+    float alpha2 = alpha * alpha;
+    float denominator = nh * nh * (alpha2 - 1.0) + 1.0;
+    float distribution = alpha2 / max(PI * denominator * denominator, 1e-8);
+    // Height-correlated Smith visibility for GGX.
+    float visibility = 0.5 / max(nl * sqrt(nv*nv*(1.0-alpha2)+alpha2)
+        + nv * sqrt(nl*nl*(1.0-alpha2)+alpha2), 1e-6);
+    float3 f0 = lerp(float3(0.04), base, metal);
+    float3 fresnel = f0 + (1.0-f0) * pow(1.0-vh, 5.0);
+    float3 diffuse = (1.0-fresnel) * (1.0-metal) * base / PI;
+    float3 specular = distribution * visibility * fresnel;
+    float3 color = (diffuse + specular) * frame.lightRadiance.xyz * nl;
+    // Temporary ambient fill; no IBL or shadows yet.
+    color += base * 0.025 * (1.0-metal);
+    color = color / (1.0 + color); // Reinhard display mapping
+    if (frame.lightRadiance.w > 0.5) color = encodeSRGB(color);
+    return float4(color, 1.0);
+}
+
