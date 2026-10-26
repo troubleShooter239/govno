@@ -1,92 +1,68 @@
-# ADR 0001: Foundation и границы модулей
+# ADR 0001: Foundation and module boundaries
 
-Дата: 2026-10-26. Статус: начальная реализация.
-Основание: восстановленные решения чата «План игрового движка» и ответы пользователя.
+Date: 2026-10-26. Status: implemented initial foundation.
+Source: decisions recovered from the engine-plan chat and the user's answers.
+This English revision repairs unreadable text in the initial documentation.
 
-## Зафиксированные требования
+## Constraints
 
-Rust Stable, Edition 2024; Cargo Workspace и статические модули.
-Vulkan 1.3 минимум, 1.4 — приоритет; Windows 11/Linux x86-64.
-Первичные аппаратные проверки: RTX 4080 Super под Windows.
-Linux-проверки отложены пользователем, поддержка остаётся целью.
-Playable MVP — небольшая сцена от первого лица.
-Редактор, runtime DLL/SO-плагины, мобильные платформы, универсальный RHI
-не входят в MVP. Ray tracing и mesh shaders не обязательны.
+Rust Stable, Edition 2024; Cargo Workspace; statically linked modules.
+Vulkan 1.3 minimum with 1.4 preferred; Windows 11/Linux x86-64.
+Primary hardware validation is on RTX 4080 Super under Windows.
+Linux validation is deferred by the user.
+The playable MVP is a small first-person scene with movement, camera,
+lighting and physical objects. No editor, runtime DLL/SO plugins, mobile
+targets or universal graphics RHI in the MVP.
 
-## Структура и направления зависимостей
+## Foundation
 
-Реализованы core, runtime, sandbox. Зависимости:
-runtime -> core; sandbox -> runtime/core. Логирование настраивает приложение.
-Не создаём пустые crates для подсистем без реализации.
+core contains minimal shared contracts; runtime depends on core.
+EngineModule: Send + Sync registers module factories in EngineBuilder.
+Factories and RunningModule do not require Send/Sync; main-thread-only
+resources are supported without unsafe thread assertions.
 
-Будущие границы (реализация с этапа 01):
-- platform: winit, окно и события ОС; не зависит от renderer/ECS.
-- render: RenderWorld, render handles, организация кадра; не зависит от игрового ECS.
-- render-vulkan: внутренний backend, ash, Vulkan allocation, команды и синхронизация.
-- scene: ECS и извлечение данных в RenderWorld; зависит от контрактов render.
-- assets: CPU-данные и загрузка; не зависит от окна или Vulkan device.
-- runtime / приложение: связывание подсистем.
+build() validates duplicate IDs, missing dependencies and cycles before
+creating resources. A deterministic topological order chooses the earliest
+registered ready module. A cycle diagnostic lists blocked modules, which
+can also include downstream dependents.
 
-Конкретное связывание render и render-vulkan утвердить при Vulkan Bootstrap:
-никаких циклических crate-зависимостей и универсального многобэкендного RHI.
-Будущие GPU handles не должны просачиваться в игровой код.
-Core не становится контейнером всех подсистем.
+run() initializes modules, executes the application closure and shuts down
+initialized modules in reverse order. The closure owns the application loop.
+This is a lifetime boundary, not a scheduler or service locator.
 
-## Регистрация и жизненный цикл
+Each successful factory transfers resource ownership to RunningModule.
+A failing factory must clean its own partially initialized resources via RAII.
+Startup failure prevents later modules from starting and rolls back earlier ones.
+Shutdown errors do not stop the cleanup of remaining modules.
 
-EngineModule: Send + Sync предоставляет register(&self, &mut EngineBuilder),
-как в эскизе исходного плана. Регистратор описывает зависимости и фабрику.
-Фабрики и RunningModule не обязаны быть Send/Sync: оконные ресурсы смогут
-жить в главном потоке. Runtime не создаёт дополнительные потоки.
+BuildError reports graph problems. RunError retains the primary error and all
+cleanup errors, including underlying error sources. Panics are not converted
+to normal errors; unwind triggers best-effort cleanup. shutdown/Drop must not
+panic. panic=abort cannot guarantee cleanup.
 
-build() проверяет дубликаты, отсутствующие зависимости, циклы и вычисляет
-детерминированный топологический порядок. Из доступных модулей выбирается
-первый по порядку регистрации. До run() фабрики не вызываются.
-Диагностика цикла перечисляет заблокированные узлы; это может включать
-зависимые от цикла модули, а не только сам цикл.
+## Architecture rules
 
-run() запускает фабрики, выполняет переданную функцию приложения и
-останавливает успешно запущенные модули в обратном порядке.
-Это граница жизни приложения, пока не игровой scheduler.
-Сервисы, frame callbacks и fixed timestep ещё не реализованы.
+Core does not depend on Vulkan, ECS or physics. Renderer does not inspect game
+ECS components. Scene extraction will produce RenderWorld in a later phase.
+Assets will load CPU data without depending on a window or Vulkan device.
+Game code must not manipulate VkImage/VkBuffer directly.
 
-## Владение и ошибки
+unsafe is forbidden in ordinary crates. render-vulkan owns audited FFI blocks.
+Rust Drop alone does not prove GPU completion. Backend destruction requires
+explicit completion tracking; later dynamic resources need deferred deletion.
 
-RunningModule владеет ресурсами подсистемы.
-Фабрика сама освобождает частично созданные ресурсы через RAII при Err.
-После ошибки запуска последующие модули не запускаются; ранее запущенные
-останавливаются. Ошибки остановки не прерывают очистку остальных модулей.
+## Validation
 
-BuildError содержит структурированную диагностику графа.
-RunError хранит исходную ошибку и все последующие ошибки очистки.
-BoxError сохраняет исходную цепочку ошибок внешних подсистем.
-Паники не превращаются в обычные ошибки: при unwind действует best-effort
-очистка уже запущенных модулей. shutdown и деструкторы не должны паниковать.
-При panic=abort очистка не гарантируется.
+11 lifecycle tests cover ordering, graph errors, partial startup, shutdown
+errors, application errors, empty engines, unstarted engines and unwind.
+The tests use Rc-backed resources to verify main-thread state compatibility.
 
-unsafe запрещён в текущих crates. Будущий render-vulkan получит локальную
-политику для аудируемых unsafe-блоков с объяснением инвариантов.
-Rust Drop не подтверждает завершение GPU: backend обязан реализовать
-completion tracking и deferred destruction. Пока GPU-ресурсов нет.
+Windows CI is configured; remote CI has not been run from this session.
+Service access and scheduling remain future work, not an implicit DI framework.
+The license is still undecided.
 
-## Проверяемые свойства
+## References
 
-Тестируются порядок запуска/завершения, отсутствующие зависимости,
-дубликаты, циклы, частичный запуск, ошибки приложения и остановки,
-пустой движок, удаление незапущенного движка и очистка при unwind.
-Тестовые ресурсы используют Rc, подтверждая отсутствие требования Send
-для runtime-состояния.
-
-## Ещё не выбранные решения
-
-GPU allocator (gpu-allocator / vk-mem), точные GPU feature profiles,
-передача runtime-сервисов и кадровый API требуют отдельного обсуждения
-перед их реализацией. Версии графических зависимостей пока не фиксируются.
-Лицензия также не выбрана. CI подготовлен для Windows, не запущен удалённо.
-
-## Источники для настройки инструментов
-
-https://doc.rust-lang.org/cargo/reference/workspaces.html
-https://doc.rust-lang.org/stable/edition-guide/rust-2024/cargo-resolver.html
-https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/
-
+- https://doc.rust-lang.org/cargo/reference/workspaces.html
+- https://doc.rust-lang.org/stable/edition-guide/rust-2024/cargo-resolver.html
+- https://docs.rs/tracing-subscriber/latest/tracing_subscriber/fmt/

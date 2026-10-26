@@ -222,6 +222,7 @@ pub fn build(
         },
         light_direction: Vec3::new(-0.5, 1.0, 0.7),
         light_radiance: Vec3::splat(4.0),
+        point_lights: point_lights(),
         instances,
     };
     Ok((world, animated, temporary))
@@ -258,4 +259,19 @@ mod winding_tests {
             }
         }
     }
+}
+
+pub fn point_lights() -> Vec<govno_render::PointLight> {
+    vec![
+        govno_render::PointLight {
+            position: Vec3::new(-3.0, 1.5, 2.0),
+            intensity: Vec3::new(24.0, 3.0, 1.0),
+            range: 7.0,
+        },
+        govno_render::PointLight {
+            position: Vec3::new(3.0, 1.5, 1.0),
+            intensity: Vec3::new(1.0, 5.0, 28.0),
+            range: 7.0,
+        },
+    ]
 }

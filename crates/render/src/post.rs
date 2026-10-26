@@ -44,6 +44,7 @@ mod tests {
                 camera: Default::default(),
                 light_direction: glam::Vec3::Y,
                 light_radiance: glam::Vec3::ONE,
+                point_lights: vec![],
                 instances: vec![],
             };
             assert!(

@@ -143,6 +143,7 @@ pub struct RenderWorld {
     /// Direction from a surface toward the light, not the direction of propagation.
     pub light_direction: Vec3,
     pub light_radiance: Vec3,
+    pub point_lights: Vec<crate::PointLight>,
     pub instances: Vec<DrawInstance>,
 }
 impl RenderWorld {
@@ -155,6 +156,12 @@ impl RenderWorld {
             || self.light_radiance.min_element() < 0.0
         {
             return Err("invalid directional light".into());
+        }
+        if self.point_lights.len() > crate::MAX_POINT_LIGHTS {
+            return Err("too many point lights for the basic Forward renderer (maximum 16)".into());
+        }
+        for light in &self.point_lights {
+            light.validate()?;
         }
         for instance in &self.instances {
             instance.transform.validate()?;

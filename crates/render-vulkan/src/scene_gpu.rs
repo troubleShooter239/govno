@@ -8,7 +8,7 @@ use govno_render::{DrawInstance, RenderExtent, RenderWorld};
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
-pub(crate) const CAMERA_BYTES: u64 = 112;
+pub(crate) const CAMERA_BYTES: u64 = 112 + 32 * govno_render::MAX_POINT_LIGHTS as u64;
 pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
     ctx: Arc<DeviceContext>,
@@ -186,22 +186,8 @@ impl SceneGpu {
         frame: usize,
         world: &RenderWorld,
         extent: RenderExtent,
-        srgb_attachment: bool,
     ) -> Result<(), BoxError> {
-        let mut data = world
-            .camera
-            .view_projection(extent)?
-            .to_cols_array()
-            .to_vec();
-        data.extend_from_slice(&world.camera.position.extend(1.0).to_array());
-        data.extend_from_slice(&world.light_direction.normalize().extend(0.0).to_array());
-        data.extend_from_slice(
-            &world
-                .light_radiance
-                .extend(if srgb_attachment { 0.0 } else { 1.0 })
-                .to_array(),
-        );
-        self.cameras[frame].write(&floats(&data))
+        self.cameras[frame].write(&frame_constants(world, extent)?)
     }
 }
 impl Drop for SceneGpu {
@@ -575,5 +561,69 @@ mod tests {
         assert_eq!(value(112), 0.25);
         assert_eq!(value(120), 0.75);
         assert_eq!(value(124), 0.6);
+    }
+}
+
+fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>, BoxError> {
+    let mut data = world
+        .camera
+        .view_projection(extent)?
+        .to_cols_array()
+        .to_vec();
+    data.extend_from_slice(&world.camera.position.extend(1.0).to_array());
+    data.extend_from_slice(&world.light_direction.normalize().extend(0.0).to_array());
+    // Exact small integer count in the previously reserved fourth component.
+    data.extend_from_slice(
+        &world
+            .light_radiance
+            .extend(world.point_lights.len() as f32)
+            .to_array(),
+    );
+    for light in &world.point_lights {
+        data.extend_from_slice(&light.position.extend(light.range).to_array());
+        data.extend_from_slice(&light.intensity.extend(0.0).to_array());
+    }
+    data.resize(CAMERA_BYTES as usize / 4, 0.0);
+    Ok(floats(&data))
+}
+#[cfg(test)]
+mod light_abi_tests {
+    use super::*;
+    #[test]
+    fn light_array_offsets_stride_count_and_unused_slots_match_shader() {
+        let mut world = RenderWorld {
+            post_process: Default::default(),
+            camera: Default::default(),
+            light_direction: glam::Vec3::Y,
+            light_radiance: glam::Vec3::splat(4.0),
+            point_lights: vec![
+                govno_render::PointLight {
+                    position: glam::Vec3::new(1.0, 2.0, 3.0),
+                    range: 5.0,
+                    intensity: glam::Vec3::new(6.0, 7.0, 8.0),
+                };
+                govno_render::MAX_POINT_LIGHTS
+            ],
+            instances: vec![],
+        };
+        let extent = RenderExtent {
+            width: 1,
+            height: 1,
+        };
+        let bytes = frame_constants(&world, extent).unwrap();
+        let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        assert_eq!(bytes.len(), 624);
+        assert_eq!(value(108), 16.0);
+        for index in 0..govno_render::MAX_POINT_LIGHTS {
+            for (component, expected) in [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 0.0]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(value(112 + 32 * index + 4 * component), expected);
+            }
+        }
+        world.point_lights.clear();
+        let bytes = frame_constants(&world, extent).unwrap();
+        assert!(bytes[108..].iter().all(|&b| b == 0));
     }
 }

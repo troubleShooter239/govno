@@ -225,7 +225,6 @@ impl VulkanRenderer {
                     width: chain.extent.width,
                     height: chain.extent.height,
                 },
-                chain.srgb_attachment,
             )?;
             let (index, suboptimal) = match self.ctx.swapchain.acquire_next_image(
                 chain.handle,

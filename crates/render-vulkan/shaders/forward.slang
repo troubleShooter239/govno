@@ -1,9 +1,11 @@
+struct PointLightData { float4 positionRange; float4 intensity; };
 struct FrameData
 {
     column_major float4x4 viewProjection;
     float4 cameraPosition;
     float4 lightDirection;
-    float4 lightRadiance; // rgb is linear radiance; w reserved
+    float4 lightRadiance; // rgb directional radiance; w point light count
+    PointLightData pointLights[16];
 };
 [[vk::binding(0, 0)]] ConstantBuffer<FrameData> frame;
 
@@ -59,10 +61,29 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
+float3 directLight(float3 n, float3 v, float3 l, float3 base, float metal, float roughness, float3 radiance)
+{
+    const float PI = 3.14159265359;
+    float3 h = safeNormalize(v + l);
+    float nv = max(dot(n,v), 0.0001);
+    float nl = saturate(dot(n,l));
+    float nh = saturate(dot(n,h));
+    float vh = saturate(dot(v,h));
+    float alpha = roughness * roughness;
+    float alpha2 = alpha * alpha;
+    float denominator = nh * nh * (alpha2 - 1.0) + 1.0;
+    float distribution = alpha2 / max(PI * denominator * denominator, 1e-8);
+    float visibility = 0.5 / max(nl * sqrt(nv*nv*(1.0-alpha2)+alpha2)
+        + nv * sqrt(nl*nl*(1.0-alpha2)+alpha2), 1e-6);
+    float3 f0 = lerp(float3(0.04), base, metal);
+    float3 fresnel = f0 + (1.0-f0) * pow(1.0-vh, 5.0);
+    float3 diffuse = (1.0-fresnel) * (1.0-metal) * base / PI;
+    float3 specular = distribution * visibility * fresnel;
+    return (diffuse + specular) * radiance * nl;
+}
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target0
 {
-    const float PI = 3.14159265359;
     float3 n = safeNormalize(input.worldNormal);
     if (draw.normalParams.y > 0.5) {
         float3 px = ddx(input.worldPosition), py = ddy(input.worldPosition);
@@ -93,27 +114,22 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     }
     float3 v = safeNormalize(frame.cameraPosition.xyz - input.worldPosition);
     float3 l = frame.lightDirection.xyz;
-    float3 h = safeNormalize(v + l);
-    float nv = max(dot(n,v), 0.0001);
-    float nl = saturate(dot(n,l));
-    float nh = saturate(dot(n,h));
-    float vh = saturate(dot(v,h));
     float3 base = draw.baseColorMetallic.xyz * baseColorTexture.Sample(baseColorSampler, input.uv).rgb;
     float2 mr = metalRoughTexture.Sample(metalRoughSampler,input.uv).gb;
     float metal = saturate(draw.baseColorMetallic.w * mr.y);
     float roughness = clamp(draw.inverseScaleSquaredRoughness.w * mr.x,0.045,1.0);
-    float alpha = roughness * roughness;
-    float alpha2 = alpha * alpha;
-    float denominator = nh * nh * (alpha2 - 1.0) + 1.0;
-    float distribution = alpha2 / max(PI * denominator * denominator, 1e-8);
-    // Height-correlated Smith visibility for GGX.
-    float visibility = 0.5 / max(nl * sqrt(nv*nv*(1.0-alpha2)+alpha2)
-        + nv * sqrt(nl*nl*(1.0-alpha2)+alpha2), 1e-6);
-    float3 f0 = lerp(float3(0.04), base, metal);
-    float3 fresnel = f0 + (1.0-f0) * pow(1.0-vh, 5.0);
-    float3 diffuse = (1.0-fresnel) * (1.0-metal) * base / PI;
-    float3 specular = distribution * visibility * fresnel;
-    float3 color = (diffuse + specular) * frame.lightRadiance.xyz * nl;
+    float3 color = directLight(n,v,l,base,metal,roughness,frame.lightRadiance.xyz);
+    for (uint i = 0; i < uint(frame.lightRadiance.w); ++i) {
+        PointLightData light = frame.pointLights[i];
+        float3 delta = light.positionRange.xyz - input.worldPosition;
+        float distanceSquared = dot(delta,delta);
+        float distance = sqrt(distanceSquared);
+        // Squared quartic window reaches zero smoothly at the finite range.
+        float ratio = distance / light.positionRange.w;
+        float window = saturate(1.0 - ratio*ratio*ratio*ratio);
+        float attenuation = window * window / max(distanceSquared,0.01);
+        color += directLight(n,v,safeNormalize(delta),base,metal,roughness,light.intensity.rgb * attenuation);
+    }
     // Temporary ambient fill; no IBL or shadows yet.
     float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
     color += base * 0.025 * (1.0-metal) * ao;

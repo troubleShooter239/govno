@@ -78,6 +78,38 @@ impl WindowDriver for GraphicsApp {
                 })?;
             tracing::info!("smoke: texture replaced after submitted frames");
         }
+        if self.smoke && self.frames == 45 {
+            self.world.point_lights[0].position.x = -1.5;
+            self.world.point_lights[1].range = 5.0;
+            tracing::info!("smoke: point light position/range updated");
+        }
+        if self.smoke && self.frames == 77 {
+            let mut dark = self.world.point_lights[0];
+            dark.intensity = Vec3::ZERO;
+            self.world
+                .point_lights
+                .resize(govno_render::MAX_POINT_LIGHTS, dark);
+            tracing::info!("smoke: maximum supported light count submitted");
+        }
+        if self.smoke && self.frames == 78 {
+            self.world.point_lights.clear();
+            tracing::info!("smoke: zero point lights submitted");
+        }
+        if self.smoke && self.frames == 79 {
+            self.world.point_lights = scene::point_lights();
+        }
+        if self.smoke && self.frames == 76 {
+            let saved = self.world.point_lights.clone();
+            self.world
+                .point_lights
+                .resize(govno_render::MAX_POINT_LIGHTS + 1, saved[0]);
+            let rejected = self.renderer.draw(&self.world).is_err();
+            self.world.point_lights = saved;
+            if !rejected {
+                return Err("smoke: excessive point lights accepted".into());
+            }
+            tracing::info!("smoke: excessive light count rejected; renderer remains usable");
+        }
         if self.smoke {
             if self.frames == 75 {
                 let saved = self.world.post_process;
