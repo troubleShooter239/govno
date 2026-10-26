@@ -97,6 +97,10 @@ pub fn build(
                     ..Default::default()
                 },
                 material: Material {
+                    emissive_texture: None,
+                    occlusion_texture: None,
+                    emissive: Vec3::ZERO,
+                    occlusion_strength: 1.0,
                     normal_texture: None,
                     metallic_roughness_texture: None,
                     normal_scale: 1.0,
@@ -121,6 +125,10 @@ pub fn build(
             rotation: Quat::from_rotation_y(0.3),
         },
         material: Material {
+            emissive_texture: None,
+            occlusion_texture: None,
+            emissive: Vec3::ZERO,
+            occlusion_strength: 1.0,
             normal_texture: None,
             metallic_roughness_texture: None,
             normal_scale: 1.0,
@@ -139,6 +147,10 @@ pub fn build(
             ..Default::default()
         },
         material: Material {
+            emissive_texture: None,
+            occlusion_texture: None,
+            emissive: Vec3::ZERO,
+            occlusion_strength: 1.0,
             normal_texture: None,
             metallic_roughness_texture: None,
             normal_scale: 1.0,
@@ -174,6 +186,7 @@ pub fn build(
         })?);
     instances[animated].material.metallic = 0.8;
     instances[animated].material.roughness = 0.9;
+    instances[animated].material.emissive = Vec3::new(0.2, 0.025, 0.01);
     let temporary = if smoke {
         let handle = renderer.upload_mesh(&self::cube())?;
         instances.push(DrawInstance {
@@ -183,6 +196,10 @@ pub fn build(
                 ..Default::default()
             },
             material: Material {
+                emissive_texture: None,
+                occlusion_texture: None,
+                emissive: Vec3::ZERO,
+                occlusion_strength: 1.0,
                 normal_texture: None,
                 metallic_roughness_texture: None,
                 normal_scale: 1.0,

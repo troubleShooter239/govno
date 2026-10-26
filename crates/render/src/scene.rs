@@ -97,6 +97,10 @@ impl Transform {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct Material {
+    pub emissive_texture: Option<TextureHandle>,
+    pub occlusion_texture: Option<TextureHandle>,
+    pub emissive: Vec3,
+    pub occlusion_strength: f32,
     pub normal_texture: Option<TextureHandle>,
     pub metallic_roughness_texture: Option<TextureHandle>,
     pub normal_scale: f32,
@@ -107,7 +111,11 @@ pub struct Material {
 }
 impl Material {
     pub fn validate(self) -> Result<(), BoxError> {
-        if !self.normal_scale.is_finite()
+        if !self.emissive.is_finite()
+            || self.emissive.min_element() < 0.0
+            || !self.occlusion_strength.is_finite()
+            || !(0.0..=1.0).contains(&self.occlusion_strength)
+            || !self.normal_scale.is_finite()
             || self.normal_scale < 0.0
             || !self.base_color.is_finite()
             || self.base_color.min_element() < 0.0
@@ -202,6 +210,10 @@ mod tests {
         );
         assert!(
             Material {
+                emissive_texture: None,
+                occlusion_texture: None,
+                emissive: Vec3::ZERO,
+                occlusion_strength: 1.0,
                 normal_texture: None,
                 metallic_roughness_texture: None,
                 normal_scale: 1.0,

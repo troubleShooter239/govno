@@ -15,12 +15,18 @@ struct FrameData
 [[vk::binding(1, 2)]] Texture2D<float4> metalRoughTexture;
 [[vk::binding(2, 2)]] SamplerState metalRoughSampler;
 
+[[vk::binding(1, 3)]] Texture2D<float4> emissiveTexture;
+[[vk::binding(2, 3)]] SamplerState emissiveSampler;
+[[vk::binding(3, 3)]] Texture2D<float4> occlusionTexture;
+[[vk::binding(4, 3)]] SamplerState occlusionSampler;
+
 struct DrawData
 {
     column_major float4x4 model;
     float4 inverseScaleSquaredRoughness;
     float4 baseColorMetallic;
     float4 normalParams; // x scale, y enabled
+    float4 emissiveOcclusion;
 };
 [[vk::push_constant]] ConstantBuffer<DrawData> draw;
 
@@ -116,7 +122,9 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float3 specular = distribution * visibility * fresnel;
     float3 color = (diffuse + specular) * frame.lightRadiance.xyz * nl;
     // Temporary ambient fill; no IBL or shadows yet.
-    color += base * 0.025 * (1.0-metal);
+    float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
+    color += base * 0.025 * (1.0-metal) * ao;
+    color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;
     color = color / (1.0 + color); // Reinhard display mapping
     if (frame.lightRadiance.w > 0.5) color = encodeSRGB(color);
     return float4(color, 1.0);

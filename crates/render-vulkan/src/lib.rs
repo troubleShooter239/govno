@@ -177,6 +177,7 @@ impl VulkanRenderer {
             return Ok(FrameStatus::Skipped);
         }
         world.validate(self.extent)?;
+        self.scene_gpu.prepare(world)?;
         for item in &world.instances {
             self.scene_gpu
                 .descriptors(self.frame_index, &item.material)?;

@@ -9,6 +9,8 @@ pub struct ImportedPrimitive {
     pub material: Material,
     pub base_color_texture: Option<TextureData>,
     pub sampling: govno_render::TextureSampling,
+    pub emissive_texture: Option<(TextureData, govno_render::TextureSampling)>,
+    pub occlusion_texture: Option<(TextureData, govno_render::TextureSampling)>,
     pub normal_texture: Option<(TextureData, govno_render::TextureSampling)>,
     pub metallic_roughness_texture: Option<(TextureData, govno_render::TextureSampling)>,
 }
@@ -64,17 +66,17 @@ fn visit(
             }
             let source = primitive.material();
             let pbr = source.pbr_metallic_roughness();
-            if source.alpha_mode() != gltf::material::AlphaMode::Opaque
-                || source.occlusion_texture().is_some()
-                || source.emissive_texture().is_some()
-                || source.emissive_factor() != [0.0; 3]
-            {
+            if source.alpha_mode() != gltf::material::AlphaMode::Opaque {
                 return Err(
                     "unsupported material: need opaque base-color-only metallic/roughness".into(),
                 );
             }
             let factor = pbr.base_color_factor();
             let mut material = Material {
+                emissive_texture: None,
+                occlusion_texture: None,
+                emissive: Vec3::from_array(source.emissive_factor()),
+                occlusion_strength: 1.0,
                 normal_texture: None,
                 metallic_roughness_texture: None,
                 normal_scale: 1.0,
@@ -159,6 +161,36 @@ fn visit(
                 None
             };
             material.validate()?;
+            let emissive_texture = if let Some(info) = source.emissive_texture() {
+                if info.tex_coord() != 0 || uv.is_none() {
+                    return Err("emissive texture requires UV0".into());
+                }
+                Some((
+                    decode_image(
+                        &images[info.texture().source().index()],
+                        govno_render::TextureColorSpace::Srgb,
+                    )?,
+                    decode_sampler(info.texture().sampler()),
+                ))
+            } else {
+                None
+            };
+            let occlusion_texture = if let Some(info) = source.occlusion_texture() {
+                if info.tex_coord() != 0 || uv.is_none() {
+                    return Err("occlusion texture requires UV0".into());
+                }
+                material.occlusion_strength = info.strength();
+                Some((
+                    decode_image(
+                        &images[info.texture().source().index()],
+                        govno_render::TextureColorSpace::Linear,
+                    )?,
+                    decode_sampler(info.texture().sampler()),
+                ))
+            } else {
+                None
+            };
+            material.validate()?;
             let vertices = positions
                 .iter()
                 .zip(&normals)
@@ -198,6 +230,8 @@ fn visit(
                 mesh,
                 material,
                 base_color_texture: texture,
+                emissive_texture,
+                occlusion_texture,
                 sampling,
                 normal_texture,
                 metallic_roughness_texture,
@@ -269,6 +303,29 @@ mod tests {
         let (_, buffers, images) = gltf::import(path)?;
         let document = gltf::Gltf::from_slice(source.as_bytes())?.document;
         decode(document, buffers, images)
+    }
+    #[test]
+    fn emissive_and_occlusion_maps_preserve_encoding_and_factors() {
+        let item = load_gltf(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/emission-occlusion.gltf"
+        ))
+        .unwrap()
+        .remove(0);
+        assert!(
+            item.material
+                .emissive
+                .abs_diff_eq(Vec3::new(0.8, 0.3, 0.05), 1e-6)
+        );
+        assert_eq!(item.material.occlusion_strength, 0.7);
+        assert_eq!(
+            item.emissive_texture.unwrap().0.color_space,
+            govno_render::TextureColorSpace::Srgb
+        );
+        assert_eq!(
+            item.occlusion_texture.unwrap().0.color_space,
+            govno_render::TextureColorSpace::Linear
+        );
     }
     #[test]
     fn authored_tangents_transform_with_mirrored_nonuniform_scale() {

@@ -168,6 +168,14 @@ fn main() -> Result<(), BoxError> {
                         material.metallic_roughness_texture =
                             Some(renderer.upload_texture_with_sampling(&data, sampling)?);
                     }
+                    if let Some((data, sampling)) = primitive.emissive_texture {
+                        material.emissive_texture =
+                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                    }
+                    if let Some((data, sampling)) = primitive.occlusion_texture {
+                        material.occlusion_texture =
+                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                    }
                     world.instances.push(govno_render::DrawInstance {
                         mesh,
                         material,

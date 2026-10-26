@@ -121,7 +121,7 @@ impl ForwardPipeline {
         unsafe {
             owner.layout = owner.ctx.device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[scene_layout; 3])
+                    .set_layouts(&[scene_layout; 4])
                     .push_constant_ranges(&[vk::PushConstantRange::default()
                         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                         .offset(0)

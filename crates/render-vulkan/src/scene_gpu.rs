@@ -9,7 +9,7 @@ use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
 pub(crate) const CAMERA_BYTES: u64 = 112;
-pub(crate) const DRAW_BYTES: u32 = 112;
+pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
     ctx: Arc<DeviceContext>,
     pub layout: vk::DescriptorSetLayout,
@@ -17,6 +17,13 @@ pub(crate) struct SceneGpu {
     pub sets: Vec<vk::DescriptorSet>,
     cameras: Vec<Buffer>,
     texture: Option<crate::texture::Texture>,
+    extras: std::collections::HashMap<
+        (
+            Option<govno_render::TextureHandle>,
+            Option<govno_render::TextureHandle>,
+        ),
+        ExtraSet,
+    >,
     memory: Rc<Memory>,
     textures: std::collections::HashMap<govno_render::TextureHandle, TextureSlot>,
 }
@@ -29,6 +36,7 @@ impl SceneGpu {
             sets: Vec::new(),
             cameras: Vec::new(),
             texture: None,
+            extras: Default::default(),
             memory: memory.clone(),
             textures: Default::default(),
         };
@@ -56,6 +64,16 @@ impl SceneGpu {
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         // SAFETY: layouts and buffers are kept alive by owner. Descriptor updates
         // occur only at startup, before any queue references these sets.
@@ -70,10 +88,10 @@ impl SceneGpu {
                     .descriptor_count(frames),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(frames),
+                    .descriptor_count(frames * 2),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(frames),
+                    .descriptor_count(frames * 2),
             ];
             owner.pool = owner.ctx.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -119,6 +137,16 @@ impl SceneGpu {
                 Default::default(),
             )?;
         }
+        owner.upload_texture(
+            govno_render::TextureHandle::from_parts(0, 2),
+            &govno_render::TextureData {
+                width: 1,
+                height: 1,
+                rgba8: vec![255; 4],
+                color_space: govno_render::TextureColorSpace::Srgb,
+            },
+            Default::default(),
+        )?;
         Ok(owner)
     }
     /// Caller has quiesced all descriptor users before entering this method.
@@ -213,6 +241,13 @@ pub(crate) fn draw_constants(instance: &DrawInstance) -> Vec<u8> {
         0.0,
         0.0,
     ]);
+    data.extend_from_slice(
+        &instance
+            .material
+            .emissive
+            .extend(instance.material.occlusion_strength)
+            .to_array(),
+    );
     floats(&data)
 }
 fn floats(values: &[f32]) -> Vec<u8> {
@@ -259,9 +294,13 @@ impl SceneGpu {
                 vk::DescriptorType::SAMPLER,
             ]
             .map(|ty| {
-                vk::DescriptorPoolSize::default()
-                    .ty(ty)
-                    .descriptor_count(frames)
+                vk::DescriptorPoolSize::default().ty(ty).descriptor_count(
+                    if ty == vk::DescriptorType::UNIFORM_BUFFER {
+                        frames
+                    } else {
+                        frames * 2
+                    },
+                )
             });
             slot.pool = self.ctx.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -326,8 +365,16 @@ impl SceneGpu {
         &self,
         frame: usize,
         material: &govno_render::Material,
-    ) -> Result<[vk::DescriptorSet; 3], BoxError> {
+    ) -> Result<[vk::DescriptorSet; 4], BoxError> {
         for (handle, space) in [
+            (
+                material.emissive_texture,
+                govno_render::TextureColorSpace::Srgb,
+            ),
+            (
+                material.occlusion_texture,
+                govno_render::TextureColorSpace::Linear,
+            ),
             (
                 material.base_color_texture,
                 govno_render::TextureColorSpace::Srgb,
@@ -370,17 +417,124 @@ impl SceneGpu {
                         .unwrap_or(govno_render::TextureHandle::from_parts(0, 1)),
                 ),
             )?,
+            self.extras
+                .get(&(material.emissive_texture, material.occlusion_texture))
+                .ok_or("material descriptors not prepared")?
+                .sets[frame],
         ])
     }
     pub fn remove_texture(&mut self, handle: govno_render::TextureHandle) -> Result<(), BoxError> {
-        if handle == govno_render::TextureHandle::from_parts(0, 0)
+        if handle == govno_render::TextureHandle::from_parts(0, 2)
+            || handle == govno_render::TextureHandle::from_parts(0, 0)
             || handle == govno_render::TextureHandle::from_parts(0, 1)
         {
             return Err("reserved fallback texture".into());
         }
+        self.extras.clear();
         self.textures
             .remove(&handle)
             .ok_or("unknown or removed texture handle")?;
+        Ok(())
+    }
+}
+
+struct ExtraSet {
+    ctx: Arc<DeviceContext>,
+    pool: vk::DescriptorPool,
+    sets: Vec<vk::DescriptorSet>,
+}
+impl Drop for ExtraSet {
+    fn drop(&mut self) {
+        // SAFETY: immutable sets are released only after renderer quiescence.
+        unsafe {
+            self.ctx.device.destroy_descriptor_pool(self.pool, None);
+        }
+    }
+}
+impl SceneGpu {
+    pub fn prepare(&mut self, world: &RenderWorld) -> Result<(), BoxError> {
+        for item in &world.instances {
+            let key = (
+                item.material.emissive_texture,
+                item.material.occlusion_texture,
+            );
+            if self.extras.contains_key(&key) {
+                continue;
+            }
+            let emission = &self
+                .textures
+                .get(
+                    &key.0
+                        .unwrap_or(govno_render::TextureHandle::from_parts(0, 2)),
+                )
+                .ok_or("unknown emissive texture")?
+                ._texture;
+            let ao = &self
+                .textures
+                .get(
+                    &key.1
+                        .unwrap_or(govno_render::TextureHandle::from_parts(0, 1)),
+                )
+                .ok_or("unknown occlusion texture")?
+                ._texture;
+            let frames = self.cameras.len() as u32;
+            let mut owner = ExtraSet {
+                ctx: self.ctx.clone(),
+                pool: vk::DescriptorPool::null(),
+                sets: Vec::new(),
+            };
+            // SAFETY: new descriptors have no users; referenced texture handles stay
+            // live until remove_texture quiesces GPU and clears this cache first.
+            unsafe {
+                let sizes = [
+                    vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(frames),
+                    vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                        .descriptor_count(frames * 2),
+                    vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::SAMPLER)
+                        .descriptor_count(frames * 2),
+                ];
+                owner.pool = self.ctx.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(frames)
+                        .pool_sizes(&sizes),
+                    None,
+                )?;
+                let layouts = vec![self.layout; frames as usize];
+                owner.sets = self.ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(owner.pool)
+                        .set_layouts(&layouts),
+                )?;
+                for set in &owner.sets {
+                    for (binding, texture) in [(1, emission), (3, ao)] {
+                        let image = [vk::DescriptorImageInfo::default()
+                            .image_view(texture.image.view)
+                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                        let sampler = [vk::DescriptorImageInfo::default().sampler(texture.sampler)];
+                        self.ctx.device.update_descriptor_sets(
+                            &[
+                                vk::WriteDescriptorSet::default()
+                                    .dst_set(*set)
+                                    .dst_binding(binding)
+                                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                                    .image_info(&image),
+                                vk::WriteDescriptorSet::default()
+                                    .dst_set(*set)
+                                    .dst_binding(binding + 1)
+                                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                                    .image_info(&sampler),
+                            ],
+                            &[],
+                        );
+                    }
+                }
+            }
+            self.extras.insert(key, owner);
+        }
         Ok(())
     }
 }
@@ -399,6 +553,10 @@ mod tests {
                 ..Default::default()
             },
             material: Material {
+                emissive_texture: None,
+                occlusion_texture: None,
+                emissive: Vec3::new(0.25, 0.5, 0.75),
+                occlusion_strength: 0.6,
                 normal_texture: None,
                 metallic_roughness_texture: None,
                 normal_scale: 1.0,
@@ -414,5 +572,8 @@ mod tests {
         assert_eq!(value(64), 0.25);
         assert_eq!(value(76), 0.4);
         assert_eq!(value(92), 0.7);
+        assert_eq!(value(112), 0.25);
+        assert_eq!(value(120), 0.75);
+        assert_eq!(value(124), 0.6);
     }
 }
