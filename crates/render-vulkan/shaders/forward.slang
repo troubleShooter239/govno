@@ -29,6 +29,7 @@ struct VertexInput
     [[vk::location(0)]] float3 position : POSITION;
     [[vk::location(1)]] float3 normal : NORMAL;
     [[vk::location(2)]] float2 uv : TEXCOORD0;
+    [[vk::location(3)]] float4 tangent : TANGENT;
 };
 struct VertexOutput
 {
@@ -36,6 +37,7 @@ struct VertexOutput
     float3 worldPosition : TEXCOORD0;
     float3 worldNormal : TEXCOORD1;
     float2 uv : TEXCOORD2;
+    float4 worldTangent : TEXCOORD3;
 };
 [shader("vertex")]
 VertexOutput vertexMain(VertexInput input)
@@ -47,6 +49,7 @@ VertexOutput vertexMain(VertexInput input)
     // For positive TRS scales: model * (normal / scale^2) = inverse-transpose * normal.
     output.worldNormal = mul(draw.model, float4(input.normal * draw.inverseScaleSquaredRoughness.xyz, 0.0)).xyz;
     output.uv = input.uv;
+    output.worldTangent = float4(mul(draw.model,float4(input.tangent.xyz,0.0)).xyz,input.tangent.w);
     return output;
 }
 float3 safeNormalize(float3 v) { return v * rsqrt(max(dot(v,v), 1e-12)); }
@@ -66,13 +69,25 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
         float3 px = ddx(input.worldPosition), py = ddy(input.worldPosition);
         float2 ux = ddx(input.uv), uy = ddy(input.uv);
         float determinant = ux.x * uy.y - ux.y * uy.x;
-        if (abs(determinant) > 1e-8) {
-            float3 tangent = (px * uy.y - py * ux.y) / determinant;
-            float3 bitangent = (py * ux.x - px * uy.x) / determinant;
+        // Sample before fragment-varying frame validity branches for defined derivatives.
+        float3 mapped = normalTexture.Sample(normalSampler,input.uv).xyz * 2.0 - 1.0;
+        float3 tangent = float3(0.0);
+        float3 bitangent = float3(0.0);
+        bool validFrame = false;
+        if (abs(input.worldTangent.w) > 0.5) {
+            tangent = safeNormalize(input.worldTangent.xyz - n * dot(n,input.worldTangent.xyz));
+            bitangent = cross(n,tangent) * (input.worldTangent.w < 0.0 ? -1.0 : 1.0);
+            validFrame = dot(tangent,tangent) > 0.5;
+        } else if (abs(determinant) > 1e-8) {
+            tangent = (px * uy.y - py * ux.y) / determinant;
+            bitangent = (py * ux.x - px * uy.x) / determinant;
             tangent = safeNormalize(tangent - n * dot(n,tangent));
             float handedness = dot(cross(n,tangent), bitangent) < 0.0 ? -1.0 : 1.0;
             bitangent = cross(n,tangent) * handedness;
-            float3 mapped = normalTexture.Sample(normalSampler,input.uv).xyz * 2.0 - 1.0;
+            validFrame = dot(tangent,tangent) > 0.5;
+        }
+        if (validFrame) {
+
             mapped.xy *= draw.normalParams.x;
             n = safeNormalize(tangent * mapped.x + bitangent * mapped.y + n * mapped.z);
         }

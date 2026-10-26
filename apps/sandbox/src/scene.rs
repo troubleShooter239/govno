@@ -20,6 +20,7 @@ pub fn cube() -> MeshData {
         let start = vertices.len() as u32;
         for (u, v) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             vertices.push(Vertex {
+                tangent: [0.0; 4],
                 position: ((normal + tangent * u + bitangent * v) * 0.5).to_array(),
                 normal: normal.to_array(),
                 uv: [(u + 1.0) * 0.5, (v + 1.0) * 0.5],
@@ -44,6 +45,7 @@ pub fn sphere() -> MeshData {
                 theta.sin() * phi.sin(),
             );
             vertices.push(Vertex {
+                tangent: [0.0; 4],
                 position: normal.to_array(),
                 normal: normal.to_array(),
                 uv: [segment as f32 / SEGMENTS as f32, ring as f32 / RINGS as f32],

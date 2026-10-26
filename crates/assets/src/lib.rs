@@ -93,13 +93,26 @@ fn visit(
                 .read_normals()
                 .ok_or("mesh is missing NORMAL")?
                 .collect();
+            let tangents: Option<Vec<_>> = reader.read_tangents().map(|t| t.collect());
             let uv: Option<Vec<_>> = reader
                 .read_tex_coords(0)
                 .map(|coords| coords.into_f32().collect());
-            if normals.len() != positions.len()
+            if tangents
+                .as_ref()
+                .is_some_and(|t| t.len() != positions.len())
+                || normals.len() != positions.len()
                 || uv.as_ref().is_some_and(|uv| uv.len() != positions.len())
             {
                 return Err("attribute counts differ".into());
+            }
+            if let Some(tangents) = &tangents
+                && tangents.iter().any(|t| {
+                    !t.iter().all(|v| v.is_finite())
+                        || t[3].abs() != 1.0
+                        || Vec3::new(t[0], t[1], t[2]).length_squared() < 1e-8
+                })
+            {
+                return Err("invalid authored tangent".into());
             }
             let mut sampling = govno_render::TextureSampling::default();
             let texture = if let Some(info) = pbr.base_color_texture() {
@@ -151,6 +164,15 @@ fn visit(
                 .zip(&normals)
                 .enumerate()
                 .map(|(i, (position, normal))| Vertex {
+                    tangent: tangents.as_ref().map_or([0.0; 4], |t| {
+                        let a = t[i];
+                        let n = normals_matrix
+                            .transform_vector3(Vec3::from_array(*normal))
+                            .normalize_or_zero();
+                        let t = matrix.transform_vector3(Vec3::new(a[0], a[1], a[2]));
+                        let t = (t - n * n.dot(t)).normalize_or_zero();
+                        [t.x, t.y, t.z, a[3] * matrix.determinant().signum()]
+                    }),
                     position: matrix
                         .transform_point3(Vec3::from_array(*position))
                         .to_array(),
@@ -247,6 +269,25 @@ mod tests {
         let (_, buffers, images) = gltf::import(path)?;
         let document = gltf::Gltf::from_slice(source.as_bytes())?.document;
         decode(document, buffers, images)
+    }
+    #[test]
+    fn authored_tangents_transform_with_mirrored_nonuniform_scale() {
+        let item = load_gltf(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tangents.gltf"
+        ))
+        .unwrap()
+        .remove(0);
+        let vertex = &item.mesh.vertices[0];
+        assert_eq!(vertex.position, [2.0, 0.0, 0.0]);
+        assert_eq!(vertex.tangent, [-1.0, 0.0, 0.0, -1.0]);
+        assert_eq!(item.mesh.indices, [0, 2, 1]);
+        let fallback = load_gltf(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/triangle.gltf"
+        ))
+        .unwrap();
+        assert_eq!(fallback[0].mesh.vertices[0].tangent, [0.0; 4]);
     }
     #[test]
     fn material_data_maps_are_linear_and_normal_scale_is_preserved() {

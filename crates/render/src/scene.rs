@@ -4,6 +4,8 @@ use govno_core::BoxError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
+    /// xyz tangent, w handedness (+/-1); all zero means use derivative fallback.
+    pub tangent: [f32; 4],
     pub uv: [f32; 2],
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -23,6 +25,13 @@ impl MeshData {
             return Err("mesh must contain indexed triangles within u32 limits".into());
         }
         for vertex in &self.vertices {
+            let tangent = Vec3::new(vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]);
+            if !vertex.tangent.iter().all(|v| v.is_finite())
+                || (vertex.tangent[3] != 0.0
+                    && (vertex.tangent[3].abs() != 1.0 || tangent.length_squared() < 1e-8))
+            {
+                return Err("invalid vertex tangent or handedness".into());
+            }
             if !vertex.uv.iter().all(|v| v.is_finite())
                 || !Vec3::from_array(vertex.position).is_finite()
                 || !Vec3::from_array(vertex.normal).is_finite()
@@ -148,9 +157,27 @@ impl RenderWorld {
 mod tests {
     use super::*;
     #[test]
+    fn invalid_authored_handedness_is_rejected() {
+        let mut mesh = MeshData {
+            vertices: vec![Vertex {
+                position: [0.0; 3],
+                normal: [0.0, 0.0, 1.0],
+                uv: [0.0; 2],
+                tangent: [1.0, 0.0, 0.0, 0.3],
+            }],
+            indices: vec![0, 0, 0],
+        };
+        assert!(mesh.validate().is_err());
+        mesh.vertices[0].tangent[3] = -1.0;
+        assert!(mesh.validate().is_ok());
+        mesh.vertices[0].tangent[0] = f32::NAN;
+        assert!(mesh.validate().is_err());
+    }
+    #[test]
     fn bad_mesh_is_rejected_before_gpu_upload() {
         let mut mesh = MeshData {
             vertices: vec![Vertex {
+                tangent: [0.0; 4],
                 position: [0.0; 3],
                 uv: [0.0; 2],
                 normal: [0.0, 1.0, 0.0],

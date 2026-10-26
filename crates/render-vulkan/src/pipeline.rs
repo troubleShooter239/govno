@@ -59,10 +59,16 @@ impl ForwardPipeline {
         ];
         let bindings = [vk::VertexInputBindingDescription {
             binding: 0,
-            stride: 32,
+            stride: 48,
             input_rate: vk::VertexInputRate::VERTEX,
         }];
         let attributes = [
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: 32,
+            },
             vk::VertexInputAttributeDescription {
                 location: 2,
                 binding: 0,

@@ -42,7 +42,13 @@ impl GpuMesh {
         let vertices: Vec<u8> = mesh
             .vertices
             .iter()
-            .flat_map(|v| v.position.into_iter().chain(v.normal).chain(v.uv))
+            .flat_map(|v| {
+                v.position
+                    .into_iter()
+                    .chain(v.normal)
+                    .chain(v.uv)
+                    .chain(v.tangent)
+            })
             .flat_map(f32::to_ne_bytes)
             .collect();
         let indices: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_ne_bytes()).collect();
