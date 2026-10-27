@@ -8,6 +8,6 @@ govno-core.workspace = true
 govno-render.workspace = true
 glam.workspace = true
 gltf = { version = "1.4", features = ["import", "utils"] }
-image = { version = "0.25.10", default-features = false, features = ["hdr"] }
+image = { version = "0.25.10", default-features = false, features = ["hdr", "exr"] }
 [lints]
 workspace = true

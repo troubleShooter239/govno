@@ -41,8 +41,8 @@ impl ShadowMap {
             owner.images.push(ImageResource::shadow(
                 memory.clone(),
                 vk::Extent2D {
-                    width: SHADOW_SIZE,
-                    height: SHADOW_SIZE,
+                    width: SHADOW_SIZE * 2,
+                    height: SHADOW_SIZE * 2,
                 },
             )?);
         }
@@ -77,10 +77,11 @@ impl ShadowMap {
         frame: usize,
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
+        viewport: govno_render::RenderExtent,
     ) -> Result<(), BoxError> {
         let matrix = world
             .directional_shadow
-            .map(|s| s.view_projection(world.light_direction))
+            .map(|s| s.cascades(&world.camera, viewport, world.light_direction))
             .transpose()?;
         let image = &self.images[frame];
         let device = &self.ctx.device;
@@ -117,8 +118,8 @@ impl ShadowMap {
                     },
                 });
             let extent = vk::Extent2D {
-                width: SHADOW_SIZE,
-                height: SHADOW_SIZE,
+                width: SHADOW_SIZE * 2,
+                height: SHADOW_SIZE * 2,
             };
             let rect = vk::Rect2D {
                 offset: vk::Offset2D::default(),
@@ -136,43 +137,60 @@ impl ShadowMap {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.pipeline,
             );
-            device.cmd_set_viewport(
-                command,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: SHADOW_SIZE as f32,
-                    height: SHADOW_SIZE as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            device.cmd_set_scissor(command, 0, &[rect]);
-            if let Some(matrix) = matrix {
-                for instance in &world.instances {
-                    let mesh = meshes.get(&instance.mesh).ok_or("unknown shadow mesh")?;
-                    let matrix = (matrix * instance.transform.matrix()).to_cols_array();
-                    let mut bytes = [0; 64];
-                    for (destination, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix)
-                    {
-                        destination.copy_from_slice(&value.to_ne_bytes());
+            for cascade in 0..4 {
+                device.cmd_set_viewport(
+                    command,
+                    0,
+                    &[vk::Viewport {
+                        x: (cascade % 2) as f32 * SHADOW_SIZE as f32,
+                        y: (cascade / 2) as f32 * SHADOW_SIZE as f32,
+                        width: SHADOW_SIZE as f32,
+                        height: SHADOW_SIZE as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                device.cmd_set_scissor(
+                    command,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: (cascade % 2) as i32 * SHADOW_SIZE as i32,
+                            y: (cascade / 2) as i32 * SHADOW_SIZE as i32,
+                        },
+                        extent: vk::Extent2D {
+                            width: SHADOW_SIZE,
+                            height: SHADOW_SIZE,
+                        },
+                    }],
+                );
+                if let Some(cascades) = &matrix {
+                    let matrix = cascades.matrices[cascade];
+                    for instance in &world.instances {
+                        let mesh = meshes.get(&instance.mesh).ok_or("unknown shadow mesh")?;
+                        let matrix = (matrix * instance.transform.matrix()).to_cols_array();
+                        let mut bytes = [0; 64];
+                        for (destination, value) in
+                            bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix)
+                        {
+                            destination.copy_from_slice(&value.to_ne_bytes());
+                        }
+                        device.cmd_push_constants(
+                            command,
+                            self.pipeline.layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            &bytes,
+                        );
+                        device.cmd_bind_vertex_buffers(command, 0, &[mesh.vertices.handle], &[0]);
+                        device.cmd_bind_index_buffer(
+                            command,
+                            mesh.indices.handle,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                        device.cmd_draw_indexed(command, mesh.index_count, 1, 0, 0, 0);
                     }
-                    device.cmd_push_constants(
-                        command,
-                        self.pipeline.layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        &bytes,
-                    );
-                    device.cmd_bind_vertex_buffers(command, 0, &[mesh.vertices.handle], &[0]);
-                    device.cmd_bind_index_buffer(
-                        command,
-                        mesh.indices.handle,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    device.cmd_draw_indexed(command, mesh.index_count, 1, 0, 0, 0);
                 }
             }
             device.cmd_end_rendering(command);

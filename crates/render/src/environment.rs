@@ -161,3 +161,44 @@ mod tests {
         }
     }
 }
+
+/// Validated scene-linear full-sphere panorama, shared without CPU GGX cooking.
+#[derive(Debug, Clone)]
+pub struct EnvironmentRadiance {
+    width: u32,
+    height: u32,
+    pixels: std::sync::Arc<[Vec3]>,
+}
+impl EnvironmentRadiance {
+    pub fn new(width: u32, height: u32, pixels: Vec<Vec3>) -> Result<Self, BoxError> {
+        if width < 4
+            || height < 2
+            || (width as usize).checked_mul(height as usize) != Some(pixels.len())
+            || pixels
+                .iter()
+                .any(|v| !v.is_finite() || v.min_element() < 0.0)
+        {
+            return Err("invalid environment radiance dimensions/pixels".into());
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels: pixels.into(),
+        })
+    }
+    pub fn constant(color: Vec3) -> Result<Self, BoxError> {
+        Self::new(4, 2, vec![color; 8])
+    }
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    pub fn sample(&self, direction: Vec3) -> Vec3 {
+        crate::specular::sample_panorama(self.width, self.height, &self.pixels, direction)
+    }
+    pub fn pixels(&self) -> &[Vec3] {
+        &self.pixels
+    }
+    pub fn diffuse(&self) -> Result<DiffuseEnvironment, BoxError> {
+        DiffuseEnvironment::from_equirectangular(self.width, self.height, &self.pixels)
+    }
+}

@@ -143,8 +143,11 @@ pub struct DrawInstance {
 pub struct RenderWorld {
     pub post_process: crate::PostProcessSettings,
     pub directional_shadow: Option<crate::DirectionalShadow>,
+    /// None disables diffuse IBL. Coefficients are a CPU fallback; an uploaded
+    /// global GPU environment overrides them with its computed SH.
     pub diffuse_environment: Option<crate::DiffuseEnvironment>,
     pub specular_environment: bool,
+    pub local_probes: Vec<crate::LocalProbe>,
     pub camera: Camera,
     /// Direction from a surface toward the light, not the direction of propagation.
     pub light_direction: Vec3,
@@ -155,11 +158,20 @@ pub struct RenderWorld {
 impl RenderWorld {
     pub fn validate(&self, extent: RenderExtent) -> Result<(), BoxError> {
         self.post_process.validate()?;
+        if self.local_probes.len() > crate::MAX_LOCAL_PROBES {
+            return Err("too many local probes".into());
+        }
         if let Some(environment) = &self.diffuse_environment {
             environment.validate()?;
         }
         if let Some(shadow) = self.directional_shadow {
-            shadow.view_projection(self.light_direction)?;
+            shadow.cascades(&self.camera, extent, self.light_direction)?;
+        }
+        for (i, probe) in self.local_probes.iter().enumerate() {
+            probe.validate()?;
+            if self.local_probes[..i].iter().any(|p| p.slot == probe.slot) {
+                return Err("duplicate local probe slot".into());
+            }
         }
         self.camera.view_projection(extent)?;
         if !self.light_direction.is_finite()

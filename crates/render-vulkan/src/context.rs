@@ -293,7 +293,9 @@ pub(crate) fn create_device(
                 .iter()
                 .enumerate()
             {
-                if properties.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                if properties
+                    .queue_flags
+                    .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
                     && surface.loader.get_physical_device_surface_support(
                         physical,
                         index as u32,

@@ -11,6 +11,7 @@ pub(crate) const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 pub(crate) struct PostProcess {
     ctx: Arc<DeviceContext>,
     pub targets: Vec<ImageResource>,
+    pub effects: Option<crate::effects::Effects>,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     pub sets: Vec<vk::DescriptorSet>,
@@ -38,6 +39,7 @@ impl PostProcess {
         let mut owner = Self {
             ctx: memory.ctx.clone(),
             targets: Vec::new(),
+            effects: None,
             layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
@@ -48,21 +50,43 @@ impl PostProcess {
                 .targets
                 .push(ImageResource::hdr(memory.clone(), extent)?);
         }
+        owner.effects = Some(crate::effects::Effects::new(
+            memory.clone(),
+            extent,
+            &owner.targets,
+        )?);
         // SAFETY: all successful handles are immediately owned. Descriptors are
         // initialized before use and remain immutable for the swapchain lifetime.
         unsafe {
-            let bindings = [vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            ];
             owner.layout = owner.ctx.device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
             )?;
-            let sizes = [vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(2)];
+            let sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(4),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(2),
+            ];
             owner.pool = owner.ctx.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(2)
@@ -74,10 +98,32 @@ impl PostProcess {
                     .descriptor_pool(owner.pool)
                     .set_layouts(&[owner.layout; 2]),
             )?;
-            for (set, target) in owner.sets.iter().zip(&owner.targets) {
+            for (i, (set, target)) in owner.sets.iter().zip(&owner.targets).enumerate() {
                 let images = [vk::DescriptorImageInfo::default()
                     .image_view(target.view)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                let effects = owner.effects.as_ref().ok_or("post effects missing")?;
+                let bloom = [vk::DescriptorImageInfo::default()
+                    .image_view(effects.bloom[i].view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                let state = [vk::DescriptorBufferInfo::default()
+                    .buffer(effects.exposure.handle)
+                    .range(16)];
+                owner.ctx.device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(&bloom),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&state),
+                    ],
+                    &[],
+                );
                 owner.ctx.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
                         .dst_set(*set)
@@ -120,7 +166,7 @@ pub(crate) fn output_constants(
 ) -> [u8; OUTPUT_BYTES as usize] {
     let mut bytes = [0; OUTPUT_BYTES as usize];
     bytes[..4].copy_from_slice(&u32::from(!srgb_attachment).to_ne_bytes());
-    bytes[4..].copy_from_slice(&settings.exposure_multiplier().to_ne_bytes());
+    bytes[4..].copy_from_slice(&settings.bloom.intensity.to_ne_bytes());
     bytes
 }
 #[cfg(test)]
@@ -130,14 +176,17 @@ mod tests {
     fn output_abi_preserves_exposure_and_encoding_path() {
         for srgb in [false, true] {
             let bytes = output_constants(
-                govno_render::PostProcessSettings { exposure_ev: -1.0 },
+                govno_render::PostProcessSettings {
+                    exposure_ev: -1.0,
+                    ..Default::default()
+                },
                 srgb,
             );
             assert_eq!(
                 u32::from_ne_bytes(bytes[..4].try_into().unwrap()),
                 u32::from(!srgb)
             );
-            assert_eq!(f32::from_ne_bytes(bytes[4..].try_into().unwrap()), 0.5);
+            assert_eq!(f32::from_ne_bytes(bytes[4..].try_into().unwrap()), 0.08);
         }
     }
 }

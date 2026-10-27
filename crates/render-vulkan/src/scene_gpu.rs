@@ -9,11 +9,12 @@ use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
 pub(crate) const CAMERA_BYTES: u64 =
-    112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144 + 16;
+    112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144 + 16 + 288 + 96;
 pub(crate) const DRAW_BYTES: u32 = 128;
 pub(crate) struct SceneGpu {
     pub shadow: crate::shadow::ShadowMap,
     specular: crate::specular::SpecularGpu,
+    loaded_probes: [bool; 3],
     ctx: Arc<DeviceContext>,
     pub layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -36,6 +37,7 @@ impl SceneGpu {
         let mut owner = Self {
             shadow: crate::shadow::ShadowMap::new(memory.clone())?,
             specular: crate::specular::SpecularGpu::new(memory.clone())?,
+            loaded_probes: [false, false, false],
             ctx: memory.ctx.clone(),
             layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
@@ -56,6 +58,11 @@ impl SceneGpu {
             )?);
         }
         let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(9)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(6)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
@@ -110,6 +117,9 @@ impl SceneGpu {
                 None,
             )?;
             let sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(frames),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(frames),
@@ -178,11 +188,27 @@ impl SceneGpu {
         )?;
         Ok(owner)
     }
+    pub fn verify_environment(
+        &mut self,
+        data: &govno_render::EnvironmentRadiance,
+    ) -> Result<[f32; 3], BoxError> {
+        self.specular.verify(data)
+    }
+    pub fn set_environment_gpu(
+        &mut self,
+        data: &govno_render::EnvironmentRadiance,
+        probe: u32,
+    ) -> Result<(), BoxError> {
+        self.specular.process(data, probe)?;
+        self.loaded_probes[probe as usize] = true;
+        Ok(())
+    }
     pub fn set_specular_environment(
         &mut self,
         data: &govno_render::SpecularEnvironment,
     ) -> Result<(), BoxError> {
         self.specular.replace(data)?;
+        self.loaded_probes[0] = true;
         self.specular.bind(&self.sets);
         for slot in self.textures.values() {
             self.specular.bind(&slot.sets);
@@ -227,7 +253,7 @@ impl SceneGpu {
         world: &RenderWorld,
         extent: RenderExtent,
     ) -> Result<(), BoxError> {
-        self.cameras[frame].write(&frame_constants(world, extent)?)
+        self.cameras[frame].write(&frame_constants(world, extent, self.loaded_probes[0])?)
     }
 }
 impl Drop for SceneGpu {
@@ -317,12 +343,15 @@ impl SceneGpu {
         unsafe {
             let sizes = [
                 vk::DescriptorType::UNIFORM_BUFFER,
+                vk::DescriptorType::STORAGE_BUFFER,
                 vk::DescriptorType::SAMPLED_IMAGE,
                 vk::DescriptorType::SAMPLER,
             ]
             .map(|ty| {
                 vk::DescriptorPoolSize::default().ty(ty).descriptor_count(
-                    if ty == vk::DescriptorType::UNIFORM_BUFFER {
+                    if ty == vk::DescriptorType::UNIFORM_BUFFER
+                        || ty == vk::DescriptorType::STORAGE_BUFFER
+                    {
                         frames
                     } else if ty == vk::DescriptorType::SAMPLED_IMAGE {
                         frames * 5
@@ -538,6 +567,9 @@ impl SceneGpu {
             unsafe {
                 let sizes = [
                     vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(frames),
+                    vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::UNIFORM_BUFFER)
                         .descriptor_count(frames),
                     vk::DescriptorPoolSize::default()
@@ -628,7 +660,11 @@ mod tests {
     }
 }
 
-fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>, BoxError> {
+fn frame_constants(
+    world: &RenderWorld,
+    extent: RenderExtent,
+    gpu_sh: bool,
+) -> Result<Vec<u8>, BoxError> {
     let mut data = world
         .camera
         .view_projection(extent)?
@@ -673,10 +709,38 @@ fn frame_constants(world: &RenderWorld, extent: RenderExtent) -> Result<Vec<u8>,
     }
     data.extend_from_slice(&[
         if world.specular_environment { 1.0 } else { 0.0 },
-        0.0,
-        0.0,
-        0.0,
+        if world.diffuse_environment.is_some() {
+            1.0
+        } else {
+            0.0
+        },
+        world.local_probes.len() as f32,
+        if gpu_sh { 1.0 } else { 0.0 },
     ]);
+    if let Some(shadow) = world.directional_shadow {
+        let cascades = shadow.cascades(&world.camera, extent, world.light_direction)?;
+        for matrix in cascades.matrices {
+            data.extend_from_slice(&matrix.to_cols_array());
+        }
+        data.extend_from_slice(&cascades.splits);
+        data.extend_from_slice(&[
+            world.camera.near,
+            shadow.cascade_blend,
+            if shadow.debug_cascades { 1.0 } else { 0.0 },
+            0.0,
+        ]);
+    } else {
+        data.resize(data.len() + 72, 0.0);
+    }
+    for i in 0..2 {
+        if let Some(probe) = world.local_probes.get(i) {
+            data.extend_from_slice(&probe.position.extend(probe.slot as f32).to_array());
+            data.extend_from_slice(&probe.bounds_min.extend(probe.fade).to_array());
+            data.extend_from_slice(&probe.bounds_max.extend(probe.strength).to_array());
+        } else {
+            data.resize(data.len() + 12, 0.0);
+        }
+    }
     Ok(floats(&data))
 }
 #[cfg(test)]
@@ -689,6 +753,7 @@ mod light_abi_tests {
             directional_shadow: None,
             diffuse_environment: None,
             specular_environment: false,
+            local_probes: vec![],
             camera: Default::default(),
             light_direction: glam::Vec3::Y,
             light_radiance: glam::Vec3::splat(4.0),
@@ -706,9 +771,9 @@ mod light_abi_tests {
             width: 1,
             height: 1,
         };
-        let bytes = frame_constants(&world, extent).unwrap();
+        let bytes = frame_constants(&world, extent, false).unwrap();
         let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 864);
+        assert_eq!(bytes.len(), 1248);
         assert!(bytes[704..].iter().all(|&b| b == 0));
         assert_eq!(value(108), 16.0);
         for index in 0..govno_render::MAX_POINT_LIGHTS {
@@ -720,12 +785,12 @@ mod light_abi_tests {
             }
         }
         world.point_lights.clear();
-        let bytes = frame_constants(&world, extent).unwrap();
+        let bytes = frame_constants(&world, extent, false).unwrap();
         assert!(bytes[108..624].iter().all(|&b| b == 0));
         world.diffuse_environment = Some(
             govno_render::DiffuseEnvironment::constant(glam::Vec3::new(0.1, 0.2, 1.5)).unwrap(),
         );
-        let bytes = frame_constants(&world, extent).unwrap();
+        let bytes = frame_constants(&world, extent, false).unwrap();
         for (i, coefficient) in world
             .diffuse_environment
             .as_ref()
@@ -740,11 +805,11 @@ mod light_abi_tests {
             );
         }
         world.specular_environment = true;
-        let bytes = frame_constants(&world, extent).unwrap();
+        let bytes = frame_constants(&world, extent, false).unwrap();
         assert_eq!(f32::from_ne_bytes(bytes[848..852].try_into().unwrap()), 1.0);
         let shadow = govno_render::DirectionalShadow::default();
         world.directional_shadow = Some(shadow);
-        let bytes = frame_constants(&world, extent).unwrap();
+        let bytes = frame_constants(&world, extent, false).unwrap();
         assert_eq!(
             &bytes[624..688],
             floats(

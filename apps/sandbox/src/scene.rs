@@ -64,7 +64,7 @@ pub fn sphere() -> MeshData {
 pub fn build(
     renderer: &mut VulkanRenderer,
     smoke: bool,
-    environment: &govno_render::SpecularEnvironment,
+    environment: &govno_render::EnvironmentRadiance,
 ) -> Result<(RenderWorld, usize, Option<MeshHandle>), BoxError> {
     let mut rgba8 = Vec::new();
     for y in 0..64 {
@@ -214,12 +214,39 @@ pub fn build(
     } else {
         None
     };
-    renderer.set_specular_environment(environment)?;
+    renderer.set_environment_gpu(environment, 0)?;
+    renderer.set_environment_gpu(
+        &govno_render::EnvironmentRadiance::constant(Vec3::new(0.5, 0.08, 0.025))?,
+        1,
+    )?;
+    renderer.set_environment_gpu(
+        &govno_render::EnvironmentRadiance::constant(Vec3::new(0.025, 0.12, 0.6))?,
+        2,
+    )?;
     let world = RenderWorld {
         post_process: Default::default(),
         directional_shadow: Some(Default::default()),
-        diffuse_environment: Some(environment.diffuse().clone()),
+        // CPU coefficients are a black fallback; the loaded GPU source supplies SH.
+        diffuse_environment: Some(govno_render::DiffuseEnvironment::constant(Vec3::ZERO)?),
         specular_environment: true,
+        local_probes: vec![
+            govno_render::LocalProbe {
+                slot: 1,
+                position: Vec3::new(-3.0, 1.0, 0.0),
+                bounds_min: Vec3::new(-7.0, -2.0, -7.0),
+                bounds_max: Vec3::new(1.0, 5.0, 7.0),
+                fade: 2.0,
+                strength: 0.65,
+            },
+            govno_render::LocalProbe {
+                slot: 2,
+                position: Vec3::new(3.0, 1.0, 0.0),
+                bounds_min: Vec3::new(-1.0, -2.0, -7.0),
+                bounds_max: Vec3::new(7.0, 5.0, 7.0),
+                fade: 2.0,
+                strength: 0.65,
+            },
+        ],
         camera: Camera {
             position: Vec3::new(0.0, 3.3, 10.0),
             pitch: -0.23,
@@ -281,7 +308,7 @@ pub fn point_lights() -> Vec<govno_render::PointLight> {
     ]
 }
 
-pub fn environment() -> Result<govno_render::SpecularEnvironment, BoxError> {
+pub fn environment() -> Result<govno_render::EnvironmentRadiance, BoxError> {
     // An authored linear HDR sky/ground panorama; no external asset dependency.
     let mut pixels = Vec::new();
     for y in 0..32 {
@@ -293,5 +320,5 @@ pub fn environment() -> Result<govno_render::SpecularEnvironment, BoxError> {
         };
         pixels.extend(vec![radiance; 64]);
     }
-    govno_render::SpecularEnvironment::from_equirectangular(64, 32, &pixels)
+    govno_render::EnvironmentRadiance::new(64, 32, pixels)
 }

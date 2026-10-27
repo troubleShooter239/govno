@@ -1,19 +1,21 @@
 //! Renderer-facing CPU data. No Vulkan, window, or ECS dependencies.
 mod camera;
 mod environment;
-pub use environment::DiffuseEnvironment;
+pub use environment::{DiffuseEnvironment, EnvironmentRadiance};
 mod light;
 pub use light::{MAX_POINT_LIGHTS, PointLight};
 mod post;
+mod probe;
+pub use probe::{LocalProbe, MAX_LOCAL_PROBES, probe_weights};
 mod scene;
 mod shadow;
 mod specular;
 pub use camera::Camera;
-pub use post::PostProcessSettings;
+pub use post::{AutoExposure, BloomSettings, PostProcessSettings};
 pub use scene::{
     DrawInstance, Material, MeshData, MeshHandle, RenderWorld, TextureHandle, Transform, Vertex,
 };
-pub use shadow::DirectionalShadow;
+pub use shadow::{CASCADE_COUNT, DirectionalShadow, ShadowCascades};
 pub use specular::{
     BRDF_LUT_SIZE, SPECULAR_HEIGHT, SPECULAR_LEVELS, SPECULAR_WIDTH, SpecularEnvironment,
     specular_brdf_lut,

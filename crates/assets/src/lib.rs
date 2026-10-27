@@ -1,5 +1,7 @@
 //! CPU-only static glTF/GLB and Radiance HDR decoding. No Vulkan or window dependencies.
+mod exr;
 mod hdr;
+pub use exr::{decode_exr, load_environment};
 use glam::{Mat4, Vec3};
 use govno_core::BoxError;
 use govno_render::{Material, MeshData, TextureData, Vertex};

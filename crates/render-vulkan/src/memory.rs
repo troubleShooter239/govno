@@ -106,6 +106,28 @@ impl Buffer {
         }
         Ok(buffer)
     }
+    /// Read mapped data after a GPU->HOST barrier and completion wait.
+    pub fn read(&mut self) -> Result<Vec<u8>, BoxError> {
+        let allocation = self.allocation.as_mut().ok_or("unallocated buffer")?;
+        if !allocation
+            .memory_properties()
+            .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+        {
+            // SAFETY: allocation is atom-aligned/padded; caller has waited for GPU writers.
+            unsafe {
+                self.memory.ctx.device.invalidate_mapped_memory_ranges(&[
+                    vk::MappedMemoryRange::default()
+                        .memory(allocation.memory())
+                        .offset(allocation.offset())
+                        .size(aligned_size(self.size, self.memory.atom_size)),
+                ])?;
+            }
+        }
+        Ok(allocation
+            .mapped_slice_mut()
+            .ok_or("buffer is not mapped")?[..self.size as usize]
+            .to_vec())
+    }
     /// Caller must ensure this range is no longer being read by the GPU.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), BoxError> {
         if bytes.len() as u64 > self.size {
@@ -202,7 +224,7 @@ impl ImageResource {
             crate::swapchain::color_range().level_count(levels),
         )
     }
-    fn with_usage(
+    pub(crate) fn with_usage(
         memory: Rc<Memory>,
         extent: vk::Extent2D,
         format: vk::Format,

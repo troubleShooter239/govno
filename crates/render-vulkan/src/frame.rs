@@ -75,9 +75,16 @@ impl Frame {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            scene
-                .shadow
-                .record(self.command, frame_index, world, meshes)?;
+            scene.shadow.record(
+                self.command,
+                frame_index,
+                world,
+                meshes,
+                govno_render::RenderExtent {
+                    width: extent.width,
+                    height: extent.height,
+                },
+            )?;
             let barriers = [
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -204,7 +211,10 @@ impl Frame {
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                     .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER
+                            | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    )
                     .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
                     .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -227,6 +237,12 @@ impl Frame {
                 self.command,
                 &vk::DependencyInfo::default().image_memory_barriers(&ready),
             );
+            chain
+                .post
+                .effects
+                .as_ref()
+                .ok_or("post effects missing")?
+                .record(self.command, frame_index, world.post_process);
             let output = [vk::RenderingAttachmentInfo::default()
                 .image_view(chain.views[image_index])
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)

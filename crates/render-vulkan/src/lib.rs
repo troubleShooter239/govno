@@ -1,5 +1,7 @@
 //! Vulkan-only bootstrap renderer. All FFI and GPU ownership stay in this crate.
+mod compute;
 mod context;
+mod effects;
 mod frame;
 mod memory;
 mod mesh;
@@ -9,6 +11,7 @@ mod scene_gpu;
 mod shadow;
 mod specular;
 mod swapchain;
+mod sync;
 mod texture;
 use ash::vk;
 use context::DeviceContext;
@@ -95,6 +98,52 @@ impl VulkanRenderer {
         }
         self.wait_idle()?;
         self.scene_gpu.set_texture(data)
+    }
+    pub fn verify_environment(
+        &mut self,
+        data: &govno_render::EnvironmentRadiance,
+    ) -> Result<[f32; 3], BoxError> {
+        self.wait_idle()?;
+        self.scene_gpu.verify_environment(data)
+    }
+    pub fn post_diagnostics(&mut self) -> Result<Option<[f32; 4]>, BoxError> {
+        self.wait_idle()?;
+        let ctx = self.ctx.clone();
+        crate::mesh::Upload::run(ctx.clone(), |cmd| {
+            crate::sync::memory(
+                &ctx,
+                cmd,
+                (
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_WRITE,
+                ),
+                (vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ),
+            )
+        })?;
+        if let Some(effects) = self
+            .swapchain
+            .as_mut()
+            .and_then(|chain| chain.post.effects.as_mut())
+        {
+            let bytes = effects.exposure.read()?;
+            let mut values = [0.0; 4];
+            for (i, b) in bytes.as_chunks::<4>().0.iter().enumerate() {
+                values[i] = f32::from_ne_bytes(*b);
+            }
+            return Ok(Some(values));
+        }
+        Ok(None)
+    }
+    pub fn set_environment_gpu(
+        &mut self,
+        data: &govno_render::EnvironmentRadiance,
+        probe: u32,
+    ) -> Result<(), BoxError> {
+        if self.failed {
+            return Err("renderer has failed".into());
+        }
+        self.wait_idle()?;
+        self.scene_gpu.set_environment_gpu(data, probe)
     }
     /// Replace the one global prefiltered environment; synchronous load-time API.
     pub fn set_specular_environment(

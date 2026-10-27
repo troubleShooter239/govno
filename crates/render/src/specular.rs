@@ -11,12 +11,14 @@ const SAMPLES: u32 = 128;
 #[derive(Debug, Clone)]
 pub struct SpecularEnvironment {
     diffuse: DiffuseEnvironment,
+    source: crate::EnvironmentRadiance,
     atlas: Vec<[f32; 4]>,
 }
 impl SpecularEnvironment {
     pub fn constant(radiance: Vec3) -> Result<Self, BoxError> {
         Ok(Self {
             diffuse: DiffuseEnvironment::constant(radiance)?,
+            source: crate::EnvironmentRadiance::constant(radiance)?,
             atlas: vec![
                 radiance.extend(1.0).to_array();
                 (SPECULAR_WIDTH * SPECULAR_HEIGHT * SPECULAR_LEVELS) as usize
@@ -71,7 +73,14 @@ impl SpecularEnvironment {
                 }
             }
         }
-        Ok(Self { diffuse, atlas })
+        Ok(Self {
+            diffuse,
+            atlas,
+            source: crate::EnvironmentRadiance::new(width, height, pixels.to_vec())?,
+        })
+    }
+    pub fn source(&self) -> &crate::EnvironmentRadiance {
+        &self.source
     }
     pub fn diffuse(&self) -> &DiffuseEnvironment {
         &self.diffuse
@@ -80,7 +89,7 @@ impl SpecularEnvironment {
         &self.atlas
     }
 }
-fn sample_panorama(width: u32, height: u32, pixels: &[Vec3], direction: Vec3) -> Vec3 {
+pub(crate) fn sample_panorama(width: u32, height: u32, pixels: &[Vec3], direction: Vec3) -> Vec3 {
     let u = (direction.z.atan2(direction.x) / TAU).rem_euclid(1.0);
     let v = direction.y.clamp(-1.0, 1.0).acos() / PI;
     let x = u * width as f32 - 0.5;
