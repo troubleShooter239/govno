@@ -32,6 +32,7 @@ mod tests {
     use super::*;
     fn world(lights: Vec<PointLight>) -> crate::RenderWorld {
         crate::RenderWorld {
+            frustum_culling: true,
             post_process: Default::default(),
             directional_shadow: None,
             diffuse_environment: None,

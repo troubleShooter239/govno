@@ -96,6 +96,12 @@ pub(crate) struct DeviceContext {
     pub queue: vk::Queue,
     pub family: u32,
     pub present_fences: bool,
+    pub capabilities: crate::capabilities::DeviceCapabilities,
+    pub pipeline_cache: vk::PipelineCache,
+    cache_path: std::path::PathBuf,
+    pub pipeline_build_ns: std::sync::atomic::AtomicU64,
+    pub pipeline_builds: std::sync::atomic::AtomicU64,
+    pub pipeline_cache_loaded_bytes: u64,
 }
 impl DeviceContext {
     pub fn instance(&self) -> &ash::Instance {
@@ -146,6 +152,23 @@ impl Drop for DeviceContext {
         // SAFETY: all child owners are gone; no further submission can occur.
         unsafe {
             let _ = self.device.device_wait_idle();
+            if self.pipeline_cache != vk::PipelineCache::null() {
+                match self.device.get_pipeline_cache_data(self.pipeline_cache) {
+                    Ok(bytes) => {
+                        if let Some(parent) = self.cache_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = crate::capabilities::save_cache(&self.cache_path, &bytes) {
+                            tracing::warn!(%e,"pipeline cache save failed");
+                        } else {
+                            tracing::info!(bytes = bytes.len(), "pipeline cache saved");
+                        }
+                    }
+                    Err(e) => tracing::warn!(?e, "pipeline cache read failed"),
+                }
+                self.device
+                    .destroy_pipeline_cache(self.pipeline_cache, None);
+            }
             self.device.destroy_device(None);
         }
     }
@@ -329,16 +352,27 @@ pub(crate) fn create_device(
             {
                 continue;
             }
+            let capabilities = crate::capabilities::probe(instance, physical, family);
+            tracing::info!(?capabilities, "GPU capability profiles");
+            if !capabilities.modern {
+                tracing::warn!(%name,"GPU rejected: Modern profile requirements not met");
+                continue;
+            }
             let priorities = [1.0];
             let queues = [vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(family)
                 .queue_priorities(&priorities)];
             let mut device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+            if capabilities.memory_budget {
+                device_extensions.push(c"VK_EXT_memory_budget".as_ptr());
+            }
             let present_fences =
                 maintenance_available && maintenance.swapchain_maintenance1 == vk::TRUE;
             let mut enabled_maintenance =
                 vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
                     .swapchain_maintenance1(true);
+            let mut enabled_v12 =
+                vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
             let mut enabled_v13 = vk::PhysicalDeviceVulkan13Features::default()
                 .dynamic_rendering(true)
                 .synchronization2(true);
@@ -348,7 +382,8 @@ pub(crate) fn create_device(
             let mut device_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queues)
                 .enabled_extension_names(&device_extensions)
-                .push_next(&mut enabled_v13);
+                .push_next(&mut enabled_v13)
+                .push_next(&mut enabled_v12);
             if present_fences {
                 device_info = device_info.push_next(&mut enabled_maintenance);
             }
@@ -362,7 +397,7 @@ pub(crate) fn create_device(
                     "No swapchain maintenance1: resize/shutdown use conventional device-idle WSI fallback"
                 );
             }
-            return Ok(Arc::new(DeviceContext {
+            let mut owner = DeviceContext {
                 surface,
                 device,
                 physical,
@@ -370,7 +405,19 @@ pub(crate) fn create_device(
                 family,
                 swapchain,
                 present_fences,
-            }));
+                capabilities,
+                pipeline_cache: vk::PipelineCache::null(),
+                cache_path: std::path::PathBuf::new(),
+                pipeline_build_ns: Default::default(),
+                pipeline_builds: Default::default(),
+                pipeline_cache_loaded_bytes: 0,
+            };
+            let (cache, path, loaded_bytes) =
+                crate::capabilities::create_cache(&owner.device, &properties)?;
+            owner.pipeline_cache_loaded_bytes = loaded_bytes;
+            owner.pipeline_cache = cache;
+            owner.cache_path = path;
+            return Ok(Arc::new(owner));
         }
         Err("no compatible GPU: need Vulkan 1.3, dynamicRendering, synchronization2, swapchain and a graphics+present queue".into())
     }

@@ -10,13 +10,21 @@ use govno_core::BoxError;
 use govno_render::{MeshHandle, RenderWorld};
 use std::{collections::HashMap, sync::Arc};
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DrawCounts {
+    pub submitted: u32,
+    pub culled: u32,
+    pub shadow: u32,
+}
 pub(crate) struct Frame {
     pub ctx: Arc<DeviceContext>,
     pub pool: vk::CommandPool,
     pub command: vk::CommandBuffer,
     pub acquired: vk::Semaphore,
-    pub fence: vk::Fence,
     pub serial: u64,
+    pub query_pool: vk::QueryPool,
+    measured_serial: u64,
+    timing_enabled: bool,
 }
 impl Frame {
     pub fn new(ctx: Arc<DeviceContext>) -> Result<Self, BoxError> {
@@ -25,11 +33,19 @@ impl Frame {
             pool: vk::CommandPool::null(),
             command: vk::CommandBuffer::null(),
             acquired: vk::Semaphore::null(),
-            fence: vk::Fence::null(),
             serial: 0,
+            query_pool: vk::QueryPool::null(),
+            measured_serial: 0,
+            timing_enabled: false,
         };
         // SAFETY: every created resource is recorded before further fallible calls.
         unsafe {
+            frame.query_pool = frame.ctx.device.create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(4),
+                None,
+            )?;
             frame.pool = frame.ctx.device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default().queue_family_index(frame.ctx.family),
                 None,
@@ -44,12 +60,44 @@ impl Frame {
                 .ctx
                 .device
                 .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
-            frame.fence = frame.ctx.device.create_fence(
-                &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                None,
-            )?;
         }
         Ok(frame)
+    }
+    pub fn enable_timing(&mut self) {
+        self.measured_serial = self.serial;
+        self.timing_enabled = true;
+    }
+    /// Call after the slot's timeline serial completed, before resetting queries.
+    pub fn timing(&mut self) -> Result<Option<[f64; 4]>, BoxError> {
+        if !self.timing_enabled || self.serial == 0 || self.serial == self.measured_serial {
+            return Ok(None);
+        }
+        let mut values = [0_u64; 4];
+        // SAFETY: caller waited for this slot's submission, and all four queries were written.
+        unsafe {
+            self.ctx.device.get_query_pool_results(
+                self.query_pool,
+                0,
+                &mut values,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )?;
+        }
+        let bits = self.ctx.capabilities.timestamp_valid_bits;
+        let mask = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << bits) - 1
+        };
+        let scale = f64::from(self.ctx.capabilities.timestamp_period) * 1e-6;
+        let interval =
+            |a: usize, b: usize| ((values[b].wrapping_sub(values[a])) & mask) as f64 * scale;
+        self.measured_serial = self.serial;
+        Ok(Some([
+            interval(0, 3),
+            interval(0, 1),
+            interval(1, 2),
+            interval(2, 3),
+        ]))
     }
     pub fn record(
         &self,
@@ -59,13 +107,20 @@ impl Frame {
         scene: &crate::scene_gpu::SceneGpu,
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
-    ) -> Result<(), BoxError> {
+    ) -> Result<DrawCounts, BoxError> {
         let device = &self.ctx.device;
+        let mut counts = DrawCounts::default();
+        let frustum = govno_render::Frustum::from_view_projection(world.camera.view_projection(
+            govno_render::RenderExtent {
+                width: chain.extent.width,
+                height: chain.extent.height,
+            },
+        )?)?;
         let image = chain.images[image_index];
         let depth = &chain.depth[frame_index];
         let hdr = &chain.post.targets[frame_index];
         let extent = chain.extent;
-        // SAFETY: frame fence has completed, so its command pool, uniform and depth
+        // SAFETY: frame timeline value has completed, so its command pool, uniform and depth
         // target are no longer in flight. Meshes are validated and retained through
         // the submission serial. Swapchain image has been acquired.
         unsafe {
@@ -75,7 +130,18 @@ impl Frame {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            scene.shadow.record(
+            if self.timing_enabled {
+                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 4);
+            }
+            if self.timing_enabled {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    self.query_pool,
+                    0,
+                );
+            }
+            counts.shadow = scene.shadow.record(
                 self.command,
                 frame_index,
                 world,
@@ -85,6 +151,14 @@ impl Frame {
                     height: extent.height,
                 },
             )?;
+            if self.timing_enabled {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    self.query_pool,
+                    1,
+                );
+            }
             let barriers = [
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -179,6 +253,19 @@ impl Frame {
                 }],
             );
             for instance in &world.instances {
+                let mesh = meshes
+                    .get(&instance.mesh)
+                    .ok_or("stale or foreign mesh handle")?;
+                if world.frustum_culling
+                    && mesh
+                        .bounds
+                        .transformed(instance.transform.matrix())
+                        .is_some_and(|bounds| !frustum.intersects(bounds))
+                {
+                    counts.culled += 1;
+                    continue;
+                }
+                counts.submitted += 1;
                 device.cmd_bind_descriptor_sets(
                     self.command,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -187,9 +274,7 @@ impl Frame {
                     &scene.descriptors(frame_index, &instance.material)?,
                     &[],
                 );
-                let mesh = meshes
-                    .get(&instance.mesh)
-                    .ok_or("stale or foreign mesh handle")?;
+
                 device.cmd_bind_vertex_buffers(self.command, 0, &[mesh.vertices.handle], &[0]);
                 device.cmd_bind_index_buffer(
                     self.command,
@@ -207,6 +292,14 @@ impl Frame {
                 device.cmd_draw_indexed(self.command, mesh.index_count, 1, 0, 0, 0);
             }
             device.cmd_end_rendering(self.command);
+            if self.timing_enabled {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    self.query_pool,
+                    2,
+                );
+            }
             let ready = [
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -296,9 +389,17 @@ impl Frame {
                 self.command,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_present),
             );
+            if self.timing_enabled {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    self.query_pool,
+                    3,
+                );
+            }
             device.end_command_buffer(self.command)?;
         }
-        Ok(())
+        Ok(counts)
     }
 }
 impl Drop for Frame {
@@ -306,7 +407,7 @@ impl Drop for Frame {
         // SAFETY: renderer waits idle before dropping frames; construction failures
         // have no submitted work. Null handles are permitted for destruction.
         unsafe {
-            self.ctx.device.destroy_fence(self.fence, None);
+            self.ctx.device.destroy_query_pool(self.query_pool, None);
             self.ctx.device.destroy_semaphore(self.acquired, None);
             self.ctx.device.destroy_command_pool(self.pool, None);
         }

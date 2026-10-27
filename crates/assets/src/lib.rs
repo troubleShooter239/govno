@@ -327,6 +327,24 @@ fn decode_sampler(sampler: gltf::texture::Sampler<'_>) -> govno_render::TextureS
 mod tests {
     use super::*;
     #[test]
+    fn binary_glb_matches_gltf_mesh_material_and_texture() {
+        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
+        let text = load_gltf(format!("{directory}triangle.gltf")).unwrap();
+        let binary = load_gltf(format!("{directory}triangle.glb")).unwrap();
+        assert_eq!(binary.len(), text.len());
+        assert_eq!(binary[0].mesh.indices, text[0].mesh.indices);
+        assert_eq!(binary[0].mesh.vertices.len(), text[0].mesh.vertices.len());
+        for (actual, expected) in binary[0].mesh.vertices.iter().zip(&text[0].mesh.vertices) {
+            assert_eq!(actual.position, expected.position);
+            assert_eq!(actual.normal, expected.normal);
+        }
+        assert_eq!(binary[0].material.base_color, text[0].material.base_color);
+        assert_eq!(
+            binary[0].base_color_texture.as_ref().unwrap().rgba8,
+            text[0].base_color_texture.as_ref().unwrap().rgba8
+        );
+    }
+    #[test]
     fn image_buffer_view_out_of_bounds_returns_error() {
         let error = load_gltf(concat!(
             env!("CARGO_MANIFEST_DIR"),

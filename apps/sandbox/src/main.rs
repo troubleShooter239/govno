@@ -17,6 +17,9 @@ struct GraphicsApp {
     animated: usize,
     temporary: Option<MeshHandle>,
     smoke: bool,
+    benchmark_path: Option<std::path::PathBuf>,
+    benchmark_warmup: usize,
+    expected_offscreen: usize,
     shadows: bool,
     environment: bool,
     specular: bool,
@@ -231,6 +234,21 @@ impl WindowDriver for GraphicsApp {
                 "GPU temporal exposure verified"
             );
         }
+        if presented && self.smoke && self.frames == 5 && self.world.frustum_culling {
+            let counts = self.renderer.last_draw_counts;
+            if (counts.culled as usize) < self.expected_offscreen {
+                return Err("off-screen stress objects were not CPU-culled".into());
+            }
+            if self.world.directional_shadow.is_some()
+                && counts.shadow != self.world.instances.len() as u32 * 4
+            {
+                return Err("main-camera culling removed shadow casters".into());
+            }
+            tracing::info!(
+                ?counts,
+                "CPU culling and independent shadow-caster verification"
+            );
+        }
         if presented {
             self.frames += 1;
         }
@@ -251,6 +269,14 @@ impl WindowDriver for GraphicsApp {
                 return Err("invalid GPU exposure state".into());
             }
         }
+        if let Some(path) = &self.benchmark_path {
+            let report = self.renderer.benchmark_report(self.benchmark_warmup)?;
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, report)?;
+            tracing::info!(path=%path.display(),"benchmark report written");
+        }
         self.renderer.wait_idle()
     }
 }
@@ -264,6 +290,10 @@ fn main() -> Result<(), BoxError> {
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
     let mut environment_path = None;
+    let mut benchmark_path = None;
+    let mut benchmark_warmup = 120_usize;
+    let mut culling_stress = 0_usize;
+    let mut frustum_culling = true;
     let mut probe_paths = [None, None];
     let mut local_probes = true;
     let mut emission = None;
@@ -275,6 +305,21 @@ fn main() -> Result<(), BoxError> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--benchmark" => {
+                benchmark_path = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--benchmark requires a path")?,
+                ))
+            }
+            "--benchmark-warmup" => {
+                benchmark_warmup = args.next().ok_or("warmup count required")?.parse()?
+            }
+            "--culling-stress" => {
+                culling_stress = args.next().ok_or("stress count required")?.parse()?;
+                if culling_stress > 100000 {
+                    return Err("stress count exceeds 100000".into());
+                }
+            }
+            "--no-culling" => frustum_culling = false,
             "--frames" => {
                 let value: u64 = args
                     .next()
@@ -333,7 +378,7 @@ fn main() -> Result<(), BoxError> {
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--smoke] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
@@ -383,8 +428,27 @@ fn main() -> Result<(), BoxError> {
                 validation,
                 callback_stats,
             )?;
+            if benchmark_path.is_some() {
+                renderer.start_benchmark();
+            }
             let (mut world, animated, temporary) =
                 scene::build(&mut renderer, smoke, &environment_data)?;
+            world.frustum_culling = frustum_culling;
+            for i in 0..culling_stress {
+                let source = &world.instances[animated];
+                world.instances.push(govno_render::DrawInstance {
+                    mesh: source.mesh,
+                    material: source.material,
+                    transform: govno_render::Transform {
+                        translation: Vec3::new(
+                            10000.0 + (i % 64) as f32 * 3.0,
+                            0.0,
+                            -((i / 64) as f32) * 3.0,
+                        ),
+                        ..Default::default()
+                    },
+                });
+            }
             for (slot, data) in &probe_data {
                 renderer.set_environment_gpu(data, *slot)?;
             }
@@ -459,6 +523,9 @@ fn main() -> Result<(), BoxError> {
                 animated,
                 temporary,
                 smoke,
+                benchmark_path,
+                benchmark_warmup,
+                expected_offscreen: culling_stress,
                 shadows,
                 environment,
                 specular,

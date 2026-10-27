@@ -246,7 +246,7 @@ impl SceneGpu {
         self.texture = Some(texture);
         Ok(())
     }
-    /// Call only after waiting for this frame slot's submission fence.
+    /// Call only after waiting for this frame slot's submission timeline value.
     pub fn update(
         &mut self,
         frame: usize,
@@ -749,6 +749,7 @@ mod light_abi_tests {
     #[test]
     fn light_array_offsets_stride_count_and_unused_slots_match_shader() {
         let mut world = RenderWorld {
+            frustum_culling: true,
             post_process: Default::default(),
             directional_shadow: None,
             diffuse_environment: None,

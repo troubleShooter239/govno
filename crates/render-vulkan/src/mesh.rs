@@ -9,6 +9,7 @@ use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
 pub(crate) struct GpuMesh {
+    pub bounds: govno_render::Aabb,
     pub vertices: Buffer,
     pub indices: Buffer,
     pub index_count: u32,
@@ -38,7 +39,7 @@ impl Drop for Upload {
 }
 impl GpuMesh {
     pub fn upload(memory: Rc<Memory>, mesh: &MeshData) -> Result<Self, BoxError> {
-        mesh.validate()?;
+        let bounds = mesh.bounds()?;
         let vertices: Vec<u8> = mesh
             .vertices
             .iter()
@@ -62,6 +63,7 @@ impl GpuMesh {
         bytes.extend_from_slice(&indices);
         staging.write(&bytes)?;
         let gpu = Self {
+            bounds,
             vertices: Buffer::new(
                 memory.clone(),
                 vertices.len() as u64,

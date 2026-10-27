@@ -224,6 +224,7 @@ pub fn build(
         2,
     )?;
     let world = RenderWorld {
+        frustum_culling: true,
         post_process: Default::default(),
         directional_shadow: Some(Default::default()),
         // CPU coefficients are a black fallback; the loaded GPU source supplies SH.

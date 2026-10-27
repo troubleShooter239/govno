@@ -20,6 +20,9 @@ impl Compute {
         push: u32,
         count: u32,
     ) -> Result<Self, BoxError> {
+        let pipeline_started = std::time::Instant::now();
+        let reflected = crate::reflection::compute(code, entry, bindings, push)?;
+        let bindings = reflected.as_slice();
         let mut owner = Self {
             ctx,
             pipeline: vk::Pipeline::null(),
@@ -77,7 +80,7 @@ impl Compute {
                 .device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?;
             let result = owner.ctx.device.create_compute_pipelines(
-                vk::PipelineCache::null(),
+                owner.ctx.pipeline_cache,
                 &[vk::ComputePipelineCreateInfo::default()
                     .layout(owner.layout)
                     .stage(
@@ -99,6 +102,14 @@ impl Compute {
                 }
             }
         }
+        owner.ctx.pipeline_build_ns.fetch_add(
+            pipeline_started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        owner
+            .ctx
+            .pipeline_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(owner)
     }
     pub fn dispatch(&self, cmd: vk::CommandBuffer, set: usize, push: &[u8], groups: [u32; 3]) {

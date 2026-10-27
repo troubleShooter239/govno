@@ -107,6 +107,7 @@ mod tests {
     fn invalid_exposure_is_rejected_by_render_world() {
         for ev in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -16.01, 16.01] {
             let world = crate::RenderWorld {
+                frustum_culling: true,
                 post_process: PostProcessSettings {
                     exposure_ev: ev,
                     ..Default::default()

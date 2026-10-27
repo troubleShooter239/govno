@@ -78,14 +78,15 @@ impl ShadowMap {
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
         viewport: govno_render::RenderExtent,
-    ) -> Result<(), BoxError> {
+    ) -> Result<u32, BoxError> {
+        let mut draws = 0;
         let matrix = world
             .directional_shadow
             .map(|s| s.cascades(&world.camera, viewport, world.light_direction))
             .transpose()?;
         let image = &self.images[frame];
         let device = &self.ctx.device;
-        // SAFETY: caller has begun command recording after the frame fence wait.
+        // SAFETY: caller has begun command recording after the frame timeline wait.
         // Per-frame depth image and meshes remain live through submission completion.
         unsafe {
             let barrier = [vk::ImageMemoryBarrier2::default()
@@ -190,6 +191,7 @@ impl ShadowMap {
                             vk::IndexType::UINT32,
                         );
                         device.cmd_draw_indexed(command, mesh.index_count, 1, 0, 0, 0);
+                        draws += 1;
                     }
                 }
             }
@@ -213,6 +215,6 @@ impl ShadowMap {
                 &vk::DependencyInfo::default().image_memory_barriers(&ready),
             );
         }
-        Ok(())
+        Ok(draws)
     }
 }

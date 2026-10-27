@@ -1,12 +1,17 @@
 //! Vulkan-only bootstrap renderer. All FFI and GPU ownership stay in this crate.
+mod capabilities;
 mod compute;
+mod timeline;
+pub use capabilities::{DeviceCapabilities, DeviceProfile};
 mod context;
 mod effects;
 mod frame;
 mod memory;
 mod mesh;
+mod metrics;
 mod pipeline;
 mod post;
+mod reflection;
 mod scene_gpu;
 mod shadow;
 mod specular;
@@ -16,6 +21,7 @@ mod texture;
 use ash::vk;
 use context::DeviceContext;
 pub use context::{SurfaceTarget, ValidationStats};
+pub use frame::DrawCounts;
 use frame::Frame;
 use govno_core::BoxError;
 use govno_render::{FrameStatus, MeshData, MeshHandle, RenderExtent, RenderWorld};
@@ -39,6 +45,8 @@ pub struct VulkanRenderer {
     renderer_id: u64,
     next_mesh: u64,
     submitted: u64,
+    timeline: timeline::Timeline,
+    measurements: metrics::Measurements,
     completed: u64,
     frames: Vec<Frame>,
     swapchain: Option<Swapchain>,
@@ -46,6 +54,7 @@ pub struct VulkanRenderer {
     dirty: bool,
     frame_index: usize,
     failed: bool,
+    pub last_draw_counts: DrawCounts,
     // Queue/pool access remains on the thread owning the desktop event loop.
     _main_thread: PhantomData<Rc<()>>,
 }
@@ -59,6 +68,7 @@ impl VulkanRenderer {
         let ctx = context::create_device(window, validation, stats)?;
         let memory = Memory::new(ctx.clone())?;
         let scene_gpu = SceneGpu::new(memory.clone(), 2)?;
+        let timeline = timeline::Timeline::new(ctx.clone())?;
         let mut renderer = Self {
             ctx,
             memory,
@@ -68,6 +78,8 @@ impl VulkanRenderer {
             renderer_id: NEXT_RENDERER.fetch_add(1, Ordering::Relaxed),
             next_mesh: 0,
             submitted: 0,
+            timeline,
+            measurements: metrics::Measurements::new(),
             completed: 0,
             frames: Vec::new(),
             swapchain: None,
@@ -75,6 +87,7 @@ impl VulkanRenderer {
             dirty: true,
             frame_index: 0,
             failed: false,
+            last_draw_counts: DrawCounts::default(),
             _main_thread: PhantomData,
         };
         for _ in 0..2 {
@@ -98,6 +111,31 @@ impl VulkanRenderer {
         }
         self.wait_idle()?;
         self.scene_gpu.set_texture(data)
+    }
+    pub fn start_benchmark(&mut self) {
+        self.measurements.enable();
+        for frame in &mut self.frames {
+            frame.enable_timing();
+        }
+    }
+    pub fn benchmark_report(&mut self, warmup: usize) -> Result<String, BoxError> {
+        if !self.measurements.enabled {
+            return Err("benchmarking was not enabled".into());
+        }
+        self.wait_idle()?;
+        for frame in &mut self.frames {
+            if let Some(timing) = frame.timing()? {
+                self.measurements.gpu_sample(timing);
+            }
+        }
+        let cpu = &self.measurements.cpu[warmup.min(self.measurements.cpu.len())..];
+        let gpu = &self.measurements.gpu[warmup.min(self.measurements.gpu.len())..];
+        let profile = &self.ctx.capabilities;
+        let report = serde_json::json!({"schema":1,"gpu":profile.name,"vendor_id":profile.vendor_id,"device_id":profile.device_id,"api_version":profile.api_version,"driver_version":profile.driver_version,"profiles":{"modern":profile.modern,"advanced":profile.advanced,"ray_tracing":profile.ray_tracing},"warmup_frames":warmup,"presented_samples":self.measurements.cpu.len(),"gpu_samples":self.measurements.gpu.len(),"cpu_draw_api":metrics::distribution(cpu),"cpu_command_record":metrics::distribution(&self.measurements.record[warmup.min(self.measurements.record.len())..]),"gpu_frame":metrics::distribution(&gpu.iter().map(|v|v[0]).collect::<Vec<_>>()),"gpu_shadow":metrics::distribution(&gpu.iter().map(|v|v[1]).collect::<Vec<_>>()),"gpu_forward":metrics::distribution(&gpu.iter().map(|v|v[2]).collect::<Vec<_>>()),"gpu_post":metrics::distribution(&gpu.iter().map(|v|v[3]).collect::<Vec<_>>()),"draws":{"main":self.measurements.submitted,"culled":self.measurements.culled,"shadow":self.measurements.shadow},"memory":self.memory.report(),"pipeline_creation":{"count":self.ctx.pipeline_builds.load(Ordering::Relaxed),"total_ms":self.ctx.pipeline_build_ns.load(Ordering::Relaxed)as f64*1e-6,"cache_loaded_bytes":self.ctx.pipeline_cache_loaded_bytes},"timeline":{"submitted":self.submitted,"completed":self.completed},"notes":"CPU = draw API wall time incl acquire/waits/submit/present, includes validation/material preparation; excludes app/event-loop work. GPU = timestamped command buffer, excludes presentation. Memory allocator counters exclude driver/WSI; optional EXT_memory_budget provides driver heap estimates. CPU command-record excludes waits and app validation. Profiles report support; optional features are not enabled."});
+        Ok(serde_json::to_string_pretty(&report)?)
+    }
+    pub fn device_capabilities(&self) -> &DeviceCapabilities {
+        &self.ctx.capabilities
     }
     pub fn verify_environment(
         &mut self,
@@ -233,6 +271,7 @@ impl VulkanRenderer {
     /// An error poisons this renderer; continuing after a failed submission could
     /// otherwise wait forever on a reset fence. The caller must tear it down.
     pub fn draw(&mut self, world: &RenderWorld) -> Result<FrameStatus, BoxError> {
+        let started = std::time::Instant::now();
         if self.failed {
             return Err("renderer is stopped after an earlier failure".into());
         }
@@ -254,6 +293,17 @@ impl VulkanRenderer {
             return Err("render world contains a stale or foreign mesh handle".into());
         }
         let result = self.draw_inner(world);
+        if self.measurements.enabled
+            && matches!(result, Ok(FrameStatus::Presented))
+            && self.measurements.cpu.len() < 100000
+        {
+            self.measurements
+                .cpu
+                .push(started.elapsed().as_secs_f64() * 1000.0);
+            self.measurements.submitted += u64::from(self.last_draw_counts.submitted);
+            self.measurements.culled += u64::from(self.last_draw_counts.culled);
+            self.measurements.shadow += u64::from(self.last_draw_counts.shadow);
+        }
         if result.is_err() {
             self.failed = true;
         }
@@ -275,11 +325,14 @@ impl VulkanRenderer {
         let frame = &mut self.frames[self.frame_index];
         let device = &self.ctx.device;
         // SAFETY: all queue operations are serialized by &mut self on the owning
-        // thread. Frame fences protect command-pool/acquire semaphore reuse;
+        // thread. Frame timeline completion protects command-pool/acquire semaphore reuse;
         // finished semaphores are indexed by acquired image, not frame index.
         unsafe {
-            device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
-            self.completed = self.completed.max(frame.serial);
+            self.timeline.wait(frame.serial)?;
+            if let Some(timing) = frame.timing()? {
+                self.measurements.gpu_sample(timing);
+            }
+            self.completed = self.timeline.completed()?;
             self.retired.collect(self.completed);
             self.scene_gpu.collect_descriptors(self.completed);
             self.scene_gpu.update(
@@ -315,7 +368,8 @@ impl VulkanRenderer {
                 }
                 device.reset_fences(&[chain.present_fences[i]])?;
             }
-            frame.record(
+            let record_started = self.measurements.enabled.then(std::time::Instant::now);
+            self.last_draw_counts = frame.record(
                 chain,
                 i,
                 self.frame_index,
@@ -323,14 +377,30 @@ impl VulkanRenderer {
                 world,
                 &self.meshes,
             )?;
-            // Reset only when work is ready to submit, never before acquisition.
-            device.reset_fences(&[frame.fence])?;
+            if let Some(start) = record_started
+                && self.measurements.record.len() < 100000
+            {
+                self.measurements
+                    .record
+                    .push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            // Signal a fresh completion value only when recorded work is ready.
+            let next_serial = self
+                .submitted
+                .checked_add(1)
+                .ok_or("submission serial exhausted")?;
             let wait = [vk::SemaphoreSubmitInfo::default()
                 .semaphore(frame.acquired)
                 .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-            let signal = [vk::SemaphoreSubmitInfo::default()
-                .semaphore(chain.finished[i])
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let signal = [
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(chain.finished[i])
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(self.timeline.semaphore)
+                    .value(next_serial)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            ];
             let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(frame.command)];
             device.queue_submit2(
                 self.ctx.queue,
@@ -338,9 +408,9 @@ impl VulkanRenderer {
                     .wait_semaphore_infos(&wait)
                     .command_buffer_infos(&commands)
                     .signal_semaphore_infos(&signal)],
-                frame.fence,
+                vk::Fence::null(),
             )?;
-            self.submitted += 1;
+            self.submitted = next_serial;
             frame.serial = self.submitted;
             let waits = [chain.finished[i]];
             let chains = [chain.handle];
@@ -383,7 +453,7 @@ impl VulkanRenderer {
             chain.quiesce()?;
         }
         self.ctx.wait_idle()?;
-        self.completed = self.submitted;
+        self.completed = self.timeline.completed()?;
         self.retired.collect(self.completed);
         self.scene_gpu.collect_descriptors(self.completed);
         Ok(())

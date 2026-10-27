@@ -12,6 +12,11 @@ pub(crate) struct Memory {
     allocator: RefCell<Allocator>,
     pub ctx: Arc<DeviceContext>,
     atom_size: u64,
+    live_bytes: std::cell::Cell<u64>,
+    device_local_bytes: std::cell::Cell<u64>,
+    allocations: std::cell::Cell<u64>,
+    total_allocations: std::cell::Cell<u64>,
+    peak_device_local_bytes: std::cell::Cell<u64>,
 }
 impl Memory {
     pub fn new(ctx: Arc<DeviceContext>) -> Result<Rc<Self>, BoxError> {
@@ -31,11 +36,72 @@ impl Memory {
             allocator: RefCell::new(allocator),
             ctx,
             atom_size,
+            live_bytes: Default::default(),
+            device_local_bytes: Default::default(),
+            allocations: Default::default(),
+            total_allocations: Default::default(),
+            peak_device_local_bytes: Default::default(),
         }))
     }
+    fn track(&self, a: &Allocation) {
+        self.live_bytes.set(self.live_bytes.get() + a.size());
+        self.allocations.set(self.allocations.get() + 1);
+        self.total_allocations.set(self.total_allocations.get() + 1);
+        if a.memory_properties()
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            self.device_local_bytes
+                .set(self.device_local_bytes.get() + a.size());
+            self.peak_device_local_bytes.set(
+                self.peak_device_local_bytes
+                    .get()
+                    .max(self.device_local_bytes.get()),
+            );
+        }
+    }
+    pub fn report(&self) -> serde_json::Value {
+        let mut driver_usage = None;
+        let mut driver_budget = None;
+        if self.ctx.capabilities.memory_budget {
+            let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+            let mut properties =
+                vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+            // SAFETY: memory-budget extension was enabled and physical device is retained.
+            unsafe {
+                self.ctx
+                    .instance()
+                    .get_physical_device_memory_properties2(self.ctx.physical, &mut properties);
+            }
+            let heaps = &properties.memory_properties.memory_heaps
+                [..properties.memory_properties.memory_heap_count as usize];
+            let indices = heaps
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    h.flags
+                        .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+                        .then_some(i)
+                })
+                .collect::<Vec<_>>();
+            driver_usage = Some(indices.iter().map(|&i| budget.heap_usage[i]).sum::<u64>());
+            driver_budget = Some(indices.iter().map(|&i| budget.heap_budget[i]).sum::<u64>());
+        }
+        serde_json::json!({"driver_device_local_usage_bytes":driver_usage,"driver_device_local_budget_bytes":driver_budget,"live_allocations":self.allocations.get(),"total_resource_allocations":self.total_allocations.get(),"live_bytes":self.live_bytes.get(),"allocator_capacity_bytes":self.allocator.borrow().capacity(),"device_local_live_bytes":self.device_local_bytes.get(),"device_local_peak_bytes":self.peak_device_local_bytes.get()})
+    }
     fn free(&self, allocation: Allocation) {
+        let size = allocation.size();
+        let local = allocation
+            .memory_properties()
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL);
         if let Err(error) = self.allocator.borrow_mut().free(allocation) {
             tracing::error!(%error, "GPU allocation cleanup failed");
+        } else {
+            self.live_bytes.set(self.live_bytes.get() - size);
+            self.allocations.set(self.allocations.get() - 1);
+            if local {
+                self.device_local_bytes
+                    .set(self.device_local_bytes.get() - size);
+            }
         }
     }
 }
@@ -96,6 +162,7 @@ impl Buffer {
                         linear: true,
                         allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                     })?;
+            buffer.memory.track(&allocation);
             buffer.allocation = Some(allocation);
             let allocation = buffer.allocation.as_ref().expect("allocated buffer");
             buffer.memory.ctx.device.bind_buffer_memory(
@@ -272,6 +339,9 @@ impl ImageResource {
                     allocation_scheme: AllocationScheme::DedicatedImage(owner.image),
                 },
             )?);
+            owner
+                .memory
+                .track(owner.allocation.as_ref().expect("allocated image"));
             let allocation = owner.allocation.as_ref().expect("allocated depth");
             owner.memory.ctx.device.bind_image_memory(
                 owner.image,

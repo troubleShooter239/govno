@@ -612,6 +612,7 @@ dependencies = [
  "govno-render",
  "gpu-allocator",
  "raw-window-handle",
+ "serde_json",
  "tracing",
 ]
 

@@ -141,6 +141,7 @@ pub struct DrawInstance {
     pub material: Material,
 }
 pub struct RenderWorld {
+    pub frustum_culling: bool,
     pub post_process: crate::PostProcessSettings,
     pub directional_shadow: Option<crate::DirectionalShadow>,
     /// None disables diffuse IBL. Coefficients are a CPU fallback; an uploaded

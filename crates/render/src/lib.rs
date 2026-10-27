@@ -1,5 +1,7 @@
 //! Renderer-facing CPU data. No Vulkan, window, or ECS dependencies.
 mod camera;
+mod visibility;
+pub use visibility::{Aabb, Frustum};
 mod environment;
 pub use environment::{DiffuseEnvironment, EnvironmentRadiance};
 mod light;
