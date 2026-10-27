@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 [dependencies]
+govno-input.workspace = true
 govno-core.workspace = true
 winit.workspace = true
 [lints]
 workspace = true
-

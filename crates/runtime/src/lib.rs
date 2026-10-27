@@ -1,7 +1,9 @@
 //! Explicit, single-threaded lifecycle orchestration.
 //! Registration may be Send + Sync; running resources deliberately need not be.
+mod time;
 use govno_core::{BoxError, ModuleId};
 use std::{collections::HashSet, fmt};
+pub use time::{FixedClock, FixedUpdate};
 
 pub trait EngineModule: Send + Sync {
     fn register(&self, builder: &mut EngineBuilder);

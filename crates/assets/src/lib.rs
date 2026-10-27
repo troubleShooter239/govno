@@ -1,4 +1,6 @@
 //! CPU-only static glTF/GLB and Radiance HDR decoding. No Vulkan or window dependencies.
+mod manager;
+pub use manager::{AssetHandle, AssetManager};
 mod exr;
 mod hdr;
 pub use exr::{decode_exr, load_environment};

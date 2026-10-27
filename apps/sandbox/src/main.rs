@@ -1,18 +1,19 @@
 mod scene;
-use glam::{Quat, Vec3};
+mod simulation;
+use glam::Vec3;
 use govno_core::BoxError;
-use govno_platform::{InputEvent, InputKey, RunOptions, WindowDriver};
+use govno_platform::{InputEvent, RunOptions, WindowDriver};
 use govno_render::{FrameStatus, MeshHandle, RenderExtent, RenderWorld};
 use govno_render_vulkan::{ValidationStats, VulkanRenderer};
 use govno_runtime::Engine;
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 struct GraphicsApp {
     renderer: VulkanRenderer,
     world: RenderWorld,
-    keys: HashSet<InputKey>,
+    simulation: simulation::Simulation,
+    model_assets: govno_assets::AssetManager<Vec<govno_assets::ImportedPrimitive>>,
     last_frame: Instant,
-    elapsed: f32,
     frames: u64,
     animated: usize,
     temporary: Option<MeshHandle>,
@@ -27,43 +28,19 @@ struct GraphicsApp {
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
-        match event {
-            InputEvent::Key { key, pressed } => {
-                if pressed {
-                    self.keys.insert(key);
-                } else {
-                    self.keys.remove(&key);
-                }
-            }
-            InputEvent::Look { x, y } => self.world.camera.look(x, y),
-            InputEvent::FocusLost => self.keys.clear(),
-        }
+        self.simulation.input(event);
     }
     fn resize(&mut self, width: u32, height: u32) {
         self.renderer.resize(RenderExtent { width, height });
     }
     fn draw(&mut self) -> Result<bool, BoxError> {
         let now = Instant::now();
-        let seconds = (now - self.last_frame).as_secs_f32().min(0.1);
+        let elapsed = now - self.last_frame;
         self.last_frame = now;
-        self.world.post_process.delta_seconds = seconds;
-        self.elapsed += seconds;
-        let held = |key| if self.keys.contains(&key) { 1.0 } else { 0.0 };
-        self.world.camera.move_local(
-            Vec3::new(
-                held(InputKey::D) - held(InputKey::A),
-                held(InputKey::E) - held(InputKey::Q),
-                held(InputKey::W) - held(InputKey::S),
-            ),
-            seconds,
-            if self.keys.contains(&InputKey::Shift) {
-                10.0
-            } else {
-                4.0
-            },
-        );
-        self.world.instances[self.animated].transform.rotation =
-            Quat::from_rotation_y(self.elapsed * 0.4);
+        self.world.post_process.delta_seconds = elapsed.as_secs_f32().min(0.1);
+        self.simulation.advance(elapsed);
+        self.world.camera = self.simulation.camera();
+        self.world.instances[self.animated].transform.rotation = self.simulation.rotation();
         if self.frames == 20
             && let Some(handle) = self.temporary.take()
         {
@@ -255,6 +232,12 @@ impl WindowDriver for GraphicsApp {
         Ok(presented)
     }
     fn shutdown(&mut self) -> Result<(), BoxError> {
+        tracing::info!(
+            ticks = self.simulation.ticks,
+            discarded_ms = self.simulation.discarded.as_secs_f64() * 1000.0,
+            cached_models = self.model_assets.len(),
+            "simulation shutdown state"
+        );
         tracing::info!(position=?self.world.camera.position, yaw=self.world.camera.yaw, "camera shutdown state");
         if self.smoke
             && let Some(state) = self.renderer.post_diagnostics()?
@@ -389,7 +372,10 @@ fn main() -> Result<(), BoxError> {
         return Err("--smoke requires --frames N with N >= 80".into());
     }
     post_process.validate()?;
-    let imported = gltf_path.map(govno_assets::load_gltf).transpose()?;
+    let mut model_assets = govno_assets::AssetManager::default();
+    let imported = gltf_path
+        .map(|path| model_assets.load(path, |path| govno_assets::load_gltf(path)))
+        .transpose()?;
     let environment_data = if let Some(path) = environment_path {
         let panorama = govno_assets::load_environment(&path)?;
         tracing::info!(path,width=panorama.width,height=panorama.height,exposure=?panorama.exposure,color_correction=?panorama.color_correction,"HDR panorama decoded; stored radiance preserved");
@@ -461,37 +447,38 @@ fn main() -> Result<(), BoxError> {
             if !local_probes {
                 world.local_probes.clear();
             }
-            if let Some(primitives) = imported {
+            if let Some(handle) = imported {
+                let primitives = model_assets.get(handle).ok_or("cached model was evicted")?;
                 let white = renderer.upload_texture(&govno_render::TextureData {
                     color_space: Default::default(),
                     width: 1,
                     height: 1,
                     rgba8: vec![255; 4],
                 })?;
-                for primitive in primitives {
+                for primitive in primitives.iter() {
                     let mesh = renderer.upload_mesh(&primitive.mesh)?;
                     let mut material = primitive.material;
-                    material.base_color_texture = Some(match primitive.base_color_texture {
+                    material.base_color_texture = Some(match &primitive.base_color_texture {
                         Some(data) => {
-                            renderer.upload_texture_with_sampling(&data, primitive.sampling)?
+                            renderer.upload_texture_with_sampling(data, primitive.sampling)?
                         }
                         None => white,
                     });
-                    if let Some((data, sampling)) = primitive.normal_texture {
+                    if let Some((data, sampling)) = &primitive.normal_texture {
                         material.normal_texture =
-                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
                     }
-                    if let Some((data, sampling)) = primitive.metallic_roughness_texture {
+                    if let Some((data, sampling)) = &primitive.metallic_roughness_texture {
                         material.metallic_roughness_texture =
-                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
                     }
-                    if let Some((data, sampling)) = primitive.emissive_texture {
+                    if let Some((data, sampling)) = &primitive.emissive_texture {
                         material.emissive_texture =
-                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
                     }
-                    if let Some((data, sampling)) = primitive.occlusion_texture {
+                    if let Some((data, sampling)) = &primitive.occlusion_texture {
                         material.occlusion_texture =
-                            Some(renderer.upload_texture_with_sampling(&data, sampling)?);
+                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
                     }
                     world.instances.push(govno_render::DrawInstance {
                         mesh,
@@ -515,10 +502,10 @@ fn main() -> Result<(), BoxError> {
             tracing::info!(exposure_ev = post_process.exposure_ev, "scene exposure");
             Ok(Box::new(GraphicsApp {
                 renderer,
+                simulation: simulation::Simulation::new(world.camera.clone()),
+                model_assets,
                 world,
-                keys: HashSet::new(),
                 last_frame: Instant::now(),
-                elapsed: 0.0,
                 frames: 0,
                 animated,
                 temporary,

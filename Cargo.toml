@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/assets", "crates/core", "crates/runtime", "apps/sandbox", "crates/platform", "crates/render", "crates/render-vulkan"]
+members = ["crates/assets", "crates/core", "crates/input", "crates/runtime", "apps/sandbox", "crates/platform", "crates/render", "crates/render-vulkan"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +11,7 @@ publish = false
 glam = "0.34"
 gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
 govno-platform = { path = "crates/platform" }
+govno-input = { path = "crates/input" }
 govno-render = { path = "crates/render" }
 govno-render-vulkan = { path = "crates/render-vulkan" }
 ash = "0.38"

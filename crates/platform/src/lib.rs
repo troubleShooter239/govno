@@ -1,7 +1,7 @@
 //! Desktop window/event-loop ownership. No dependency on graphics or ECS.
-mod input;
+
 use govno_core::BoxError;
-pub use input::{InputEvent, InputKey};
+pub use govno_input::{InputEvent, InputKey};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -118,6 +118,10 @@ impl ApplicationHandler for DesktopApp {
                         KeyCode::KeyQ => Some(InputKey::Q),
                         KeyCode::KeyE => Some(InputKey::E),
                         KeyCode::ShiftLeft => Some(InputKey::Shift),
+                        KeyCode::Space => Some(InputKey::Space),
+                        KeyCode::KeyF => Some(InputKey::F),
+                        KeyCode::KeyR => Some(InputKey::R),
+                        KeyCode::F1 => Some(InputKey::F1),
                         _ => None,
                     };
                     if let Some(key) = key

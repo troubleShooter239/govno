@@ -586,10 +586,15 @@ name = "govno-core"
 version = "0.1.0"
 
 [[package]]
+name = "govno-input"
+version = "0.1.0"
+
+[[package]]
 name = "govno-platform"
 version = "0.1.0"
 dependencies = [
  "govno-core",
+ "govno-input",
  "winit",
 ]
 
@@ -630,6 +635,7 @@ dependencies = [
  "glam",
  "govno-assets",
  "govno-core",
+ "govno-input",
  "govno-platform",
  "govno-render",
  "govno-render-vulkan",
