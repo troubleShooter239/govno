@@ -220,7 +220,7 @@ pub fn build(
             },
         ],
         camera: Camera {
-            position: Vec3::new(0.0, 3.3, 10.0),
+            position: Vec3::new(0.0, 3.3, 6.0),
             pitch: -0.23,
             ..Default::default()
         },

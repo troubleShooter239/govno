@@ -35,6 +35,7 @@ pub(crate) fn image_count(caps: &vk::SurfaceCapabilitiesKHR) -> u32 {
     }
 }
 pub(crate) struct Swapchain {
+    pub format: vk::Format,
     pub ctx: Arc<DeviceContext>,
     pub handle: vk::SwapchainKHR,
     pub extent: vk::Extent2D,
@@ -98,6 +99,7 @@ impl Swapchain {
         unsafe {
             let handle = ctx.swapchain.create_swapchain(&info, None)?;
             let mut chain = Self {
+                format: format.format,
                 ctx,
                 handle,
                 extent,

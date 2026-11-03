@@ -18,6 +18,7 @@ mod specular;
 mod swapchain;
 mod sync;
 mod texture;
+mod ui;
 use ash::vk;
 use context::DeviceContext;
 pub use context::{SurfaceTarget, ValidationStats};
@@ -37,6 +38,7 @@ use std::{marker::PhantomData, rc::Rc, sync::Arc};
 use swapchain::Swapchain;
 
 pub struct VulkanRenderer {
+    ui: Option<ui::Ui>,
     ctx: Arc<DeviceContext>,
     memory: Rc<Memory>,
     scene_gpu: SceneGpu,
@@ -70,6 +72,7 @@ impl VulkanRenderer {
         let scene_gpu = SceneGpu::new(memory.clone(), 2)?;
         let timeline = timeline::Timeline::new(ctx.clone())?;
         let mut renderer = Self {
+            ui: None,
             ctx,
             memory,
             scene_gpu,
@@ -242,6 +245,27 @@ impl VulkanRenderer {
         self.extent = extent;
         self.dirty = true;
     }
+    pub fn update_ui(
+        &mut self,
+        context: &egui::Context,
+        output: egui::FullOutput,
+    ) -> Result<(), BoxError> {
+        if self.ui.as_ref().is_none_or(|ui| ui.needs_wait(&output)) {
+            self.wait_idle()?;
+        }
+        if self.ui.is_none() {
+            let format = self
+                .swapchain
+                .as_ref()
+                .ok_or("UI needs a swapchain")?
+                .format;
+            self.ui = Some(ui::Ui::new(self.ctx.clone(), format, self.frames.len())?);
+        }
+        self.ui
+            .as_mut()
+            .expect("UI initialized")
+            .update(context, output, self.frames[0].pool)
+    }
 
     fn recreate(&mut self) -> Result<(), BoxError> {
         if self.extent.is_zero() {
@@ -256,6 +280,9 @@ impl VulkanRenderer {
             .map_or(vk::SwapchainKHR::null(), |s| s.handle);
         let new = Swapchain::new(self.memory.clone(), self.extent, old, self.scene_gpu.layout)?;
         if let Some(new) = new {
+            if let Some(ui) = &mut self.ui {
+                ui.format(new.format)?;
+            }
             self.swapchain = Some(new);
             self.dirty = false;
         }
@@ -364,11 +391,11 @@ impl VulkanRenderer {
             let record_started = self.measurements.enabled.then(std::time::Instant::now);
             self.last_draw_counts = frame.record(
                 chain,
-                i,
-                self.frame_index,
+                (i, self.frame_index),
                 &self.scene_gpu,
                 world,
                 &self.meshes,
+                self.ui.as_mut(),
             )?;
             if let Some(start) = record_started
                 && self.measurements.record.len() < 100000
@@ -458,6 +485,7 @@ impl Drop for VulkanRenderer {
             tracing::error!(%error, "renderer cleanup wait failed");
         }
         self.swapchain.take();
+        self.ui.take();
         self.frames.clear();
         self.meshes.clear();
         self.retired.collect(u64::MAX);

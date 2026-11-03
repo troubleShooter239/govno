@@ -102,12 +102,13 @@ impl Frame {
     pub fn record(
         &self,
         chain: &Swapchain,
-        image_index: usize,
-        frame_index: usize,
+        indices: (usize, usize),
         scene: &crate::scene_gpu::SceneGpu,
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
+        ui: Option<&mut crate::ui::Ui>,
     ) -> Result<DrawCounts, BoxError> {
+        let (image_index, frame_index) = indices;
         let device = &self.ctx.device;
         let mut counts = DrawCounts::default();
         let frustum = govno_render::Frustum::from_view_projection(world.camera.view_projection(
@@ -374,6 +375,9 @@ impl Frame {
                 &output,
             );
             device.cmd_draw(self.command, 3, 1, 0, 0);
+            if let Some(ui) = ui {
+                ui.record(frame_index, self.command, extent)?;
+            }
             device.cmd_end_rendering(self.command);
             let to_present = [vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)

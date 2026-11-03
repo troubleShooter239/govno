@@ -6,17 +6,22 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+pub use winit::event::WindowEvent as NativeWindowEvent;
+pub use winit::keyboard::{KeyCode, PhysicalKey};
 pub use winit::window::Window;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
     event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
+    keyboard::{Key, NamedKey},
     window::WindowId,
 };
 
 pub trait WindowDriver {
+    fn window_event(&mut self, _window: &Window, _event: &NativeWindowEvent) -> bool {
+        false
+    }
     fn input(&mut self, _event: InputEvent) {}
     fn resize(&mut self, width: u32, height: u32);
     /// Returns true only for a presented frame.
@@ -80,7 +85,9 @@ impl ApplicationHandler for DesktopApp {
             let window = Arc::new(
                 event_loop.create_window(
                     Window::default_attributes()
-                        .with_title("GOVNO | Basic 3D | WASD + RMB look | Q/E vertical")
+                        .with_title(
+                            "GOVNO | Playable MVP | WASD + RMB | Space jump | F push | F1 debug",
+                        )
                         .with_inner_size(PhysicalSize::new(1280, 720)),
                 )?,
             );
@@ -95,6 +102,23 @@ impl ApplicationHandler for DesktopApp {
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
+            return;
+        }
+        let consumed = if let (Some(driver), Some(window)) = (&mut self.driver, &self.window) {
+            driver.window_event(window, &event)
+        } else {
+            false
+        };
+        if consumed
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        ..
+                    }
+            )
+        {
             return;
         }
         match event {

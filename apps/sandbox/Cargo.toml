@@ -7,6 +7,9 @@ publish.workspace = true
 default-run = "govno-sandbox"
 
 [dependencies]
+govno-ecs.workspace = true
+egui.workspace = true
+egui-winit.workspace = true
 govno-scene.workspace = true
 govno-input.workspace = true
 govno-assets = { path = "../../crates/assets" }

@@ -22,6 +22,8 @@ pub struct SceneDescription {
     pub point_lights: Vec<PointLightDescription>,
     #[serde(default)]
     pub models: Vec<ModelDescription>,
+    #[serde(default)]
+    pub player: bool,
 }
 
 impl SceneDescription {
@@ -100,6 +102,17 @@ impl SceneDescription {
                 );
             }
             model.transform.to_transform().validate()?;
+            if let Some(body) = &model.physics {
+                let half =
+                    Vec3::from_array(body.half_extents) * Vec3::from_array(model.transform.scale);
+                if !half.is_finite() || half.min_element() < 0.001 || half.max_element() > 10000.0 {
+                    return Err(format!(
+                        "model {} needs collider half extents in [0.001,10000]",
+                        model.id
+                    )
+                    .into());
+                }
+            }
         }
         Ok(())
     }
@@ -114,6 +127,17 @@ pub struct ModelDescription {
     pub asset: String,
     #[serde(default)]
     pub transform: TransformDescription,
+    #[serde(default)]
+    pub physics: Option<PhysicsDescription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicsDescription {
+    /// Local cuboid half extents, scaled by the model transform.
+    pub half_extents: [f32; 3],
+    #[serde(default)]
+    pub dynamic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

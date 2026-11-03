@@ -1,6 +1,6 @@
+mod debug_ui;
 mod scene;
 mod scene_upload;
-mod simulation;
 use glam::Vec3;
 use govno_core::BoxError;
 use govno_platform::{InputEvent, RunOptions, WindowDriver};
@@ -12,10 +12,10 @@ use std::{sync::Arc, time::Instant};
 struct GraphicsApp {
     renderer: VulkanRenderer,
     world: RenderWorld,
-    simulation: simulation::Simulation,
+    simulation: govno_ecs::Simulation,
+    debug_ui: debug_ui::DebugUi,
     model_assets: govno_assets::AssetManager<Vec<govno_assets::ImportedPrimitive>>,
     last_frame: Instant,
-    animated: Option<usize>,
     scene_path: Option<std::path::PathBuf>,
     prepared_scene: Option<govno_scene::PreparedScene>,
     scene_upload: Option<scene_upload::SceneUpload>,
@@ -24,6 +24,13 @@ struct GraphicsApp {
     expected_offscreen: usize,
 }
 impl WindowDriver for GraphicsApp {
+    fn window_event(
+        &mut self,
+        window: &govno_platform::Window,
+        event: &govno_platform::NativeWindowEvent,
+    ) -> bool {
+        self.debug_ui.event(window, event, &mut self.simulation)
+    }
     fn input(&mut self, event: InputEvent) {
         self.simulation.input(event);
     }
@@ -39,10 +46,14 @@ impl WindowDriver for GraphicsApp {
         if self.simulation.take_scene_reload() && self.scene_path.is_some() {
             self.reload_scene()?;
         }
-        self.world.camera = self.simulation.camera();
-        if let Some(index) = self.animated {
-            self.world.instances[index].transform.rotation = self.simulation.rotation();
-        }
+        self.simulation.extract(&mut self.world);
+        let output = self.debug_ui.draw(
+            &mut self.simulation,
+            &mut self.world,
+            elapsed,
+            self.model_assets.len(),
+        );
+        self.renderer.update_ui(&self.debug_ui.context, output)?;
         Ok(self.renderer.draw(&self.world)? == FrameStatus::Presented)
     }
     fn shutdown(&mut self) -> Result<(), BoxError> {
@@ -55,6 +66,7 @@ impl WindowDriver for GraphicsApp {
             tracing::info!(path=%path.display(), "benchmark report written");
         }
         self.world.instances.clear();
+        self.simulation.clear();
         if let Some(upload) = self.scene_upload.take() {
             upload.release(&mut self.renderer)?;
         }
@@ -223,7 +235,7 @@ fn main() -> Result<(), BoxError> {
         let frames = govno_platform::run(options, move |window| {
             let size = window.inner_size();
             let mut renderer = VulkanRenderer::new(
-                window,
+                window.clone(),
                 RenderExtent {
                     width: size.width,
                     height: size.height,
@@ -279,16 +291,39 @@ fn main() -> Result<(), BoxError> {
                 world.directional_shadow = None;
             }
             tracing::info!(exposure_ev = post_process.exposure_ev, "scene exposure");
+            let debug_ui = debug_ui::DebugUi::new(window.clone());
+            let mut simulation = govno_ecs::Simulation::new(world.camera.clone());
+            let mut instances = std::mem::take(&mut world.instances);
+            if animated.is_none()
+                && let Some(prepared) = &prepared_scene
+            {
+                install_scene(&mut simulation, prepared, &mut instances);
+            }
+            for (index, instance) in instances.into_iter().enumerate() {
+                let half = instance.transform.scale * 0.5;
+                let entity = simulation.spawn(instance);
+                if Some(index) == animated {
+                    simulation.cuboid(entity, half, true);
+                } else if animated.is_some_and(|animated| index == animated + 1) {
+                    simulation.cuboid(entity, half, false);
+                } else if animated.is_some_and(|animated| index < animated) {
+                    simulation.sphere(entity, half.x);
+                }
+            }
+            if animated.is_some() {
+                simulation.enable_player();
+            }
+            simulation.extract(&mut world);
             Ok(Box::new(GraphicsApp {
                 renderer,
-                simulation: simulation::Simulation::new(world.camera.clone()),
+                simulation,
+                debug_ui,
                 model_assets,
                 scene_path,
                 prepared_scene,
                 scene_upload,
                 world,
                 last_frame: Instant::now(),
-                animated,
                 benchmark_path,
                 benchmark_warmup,
                 expected_offscreen: culling_stress,
@@ -380,6 +415,9 @@ impl GraphicsApp {
         self.world.light_radiance = next.light_radiance;
         self.world.point_lights = next.point_lights;
         self.simulation.reset_camera(self.world.camera.clone());
+        self.simulation.clear();
+        install_scene(&mut self.simulation, &prepared, &mut self.world.instances);
+        self.simulation.extract(&mut self.world);
         let previous = self.scene_upload.replace(upload);
         self.prepared_scene = Some(prepared);
         if let Some(previous) = previous {
@@ -390,5 +428,31 @@ impl GraphicsApp {
         tracing::info!(path=%path.display(), cached_models=self.model_assets.len(),
             instances=self.world.instances.len(), "authored scene reloaded");
         Ok(true)
+    }
+}
+
+fn install_scene(
+    simulation: &mut govno_ecs::Simulation,
+    prepared: &govno_scene::PreparedScene,
+    instances: &mut Vec<govno_render::DrawInstance>,
+) {
+    let mut draws = std::mem::take(instances).into_iter();
+    for (model, description) in prepared.models().iter().zip(&prepared.description().models) {
+        if let Some(entity) = simulation.spawn_model(draws.by_ref().take(model.data().len()))
+            && let Some(body) = &description.physics
+        {
+            simulation.cuboid(
+                entity,
+                Vec3::from_array(body.half_extents) * model.transform().scale,
+                body.dynamic,
+            );
+        }
+    }
+    // Additional app-owned draws, such as the culling stress fixture.
+    for instance in draws {
+        simulation.spawn(instance);
+    }
+    if prepared.description().player {
+        simulation.enable_player();
     }
 }

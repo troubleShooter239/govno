@@ -160,12 +160,14 @@ pub fn prepare_model(
         .and_then(|name| name.to_str())
         .ok_or("model filename must be UTF-8")?;
     let description = govno_scene::SceneDescription {
+        player: false,
         version: 1,
         name: "Imported model".into(),
         camera: Default::default(),
         sun: Default::default(),
         point_lights: vec![],
         models: vec![govno_scene::ModelDescription {
+            physics: None,
             id: "imported".into(),
             asset: filename.into(),
             transform: Default::default(),
