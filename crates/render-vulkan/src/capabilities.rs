@@ -22,6 +22,9 @@ pub struct DeviceCapabilities {
     pub bindless_capacity: u32,
     pub legacy_materials: bool,
     pub max_storage_buffer_range: u32,
+    pub gpu_culling: bool,
+    pub max_draw_indirect_count: u32,
+    pub max_compute_groups: u32,
     pub buffer_device_address: bool,
     pub max_push_constants: u32,
     pub max_image_dimension: u32,
@@ -70,6 +73,8 @@ pub(crate) fn probe(
             features = features.push_next(&mut acceleration).push_next(&mut rt);
         }
         instance.get_physical_device_features2(physical, &mut features);
+        let indirect = features.features.multi_draw_indirect != 0
+            && features.features.draw_indirect_first_instance != 0;
         let format = |f: vk::Format, flags: vk::FormatFeatureFlags| {
             instance
                 .get_physical_device_format_properties(physical, f)
@@ -162,6 +167,9 @@ pub(crate) fn probe(
             legacy_materials: l.max_per_stage_descriptor_storage_buffers >= 8
                 && l.max_descriptor_set_storage_buffers >= 8,
             max_storage_buffer_range: l.max_storage_buffer_range,
+            gpu_culling: indirect && v12.draw_indirect_count != 0,
+            max_draw_indirect_count: l.max_draw_indirect_count,
+            max_compute_groups: l.max_compute_work_group_count[0],
             buffer_device_address: v12.buffer_device_address != 0,
             max_push_constants: l.max_push_constants_size,
             max_image_dimension: l.max_image_dimension2_d,

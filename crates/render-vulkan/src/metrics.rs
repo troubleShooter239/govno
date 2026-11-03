@@ -2,12 +2,13 @@
 pub(crate) struct Measurements {
     pub cpu: Vec<f64>,
     pub record: Vec<f64>,
-    pub gpu: Vec<[f64; 4]>,
+    pub gpu: Vec<[f64; 5]>,
     pub enabled: bool,
     pub submitted: u64,
     pub culled: u64,
     pub shadow: u64,
     pub descriptor_binds: u64,
+    pub indirect_calls: u64,
 }
 impl Measurements {
     pub fn new() -> Self {
@@ -19,7 +20,7 @@ impl Measurements {
         self.record.reserve(4096);
         self.gpu.reserve(4096);
     }
-    pub fn gpu_sample(&mut self, value: [f64; 4]) {
+    pub fn gpu_sample(&mut self, value: [f64; 5]) {
         if self.enabled && self.gpu.len() < 100000 {
             self.gpu.push(value);
         }

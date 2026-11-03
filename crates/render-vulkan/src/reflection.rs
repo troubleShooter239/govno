@@ -19,7 +19,8 @@ fn document(entry: &str) -> Result<&'static str, BoxError> {
         "integrateBRDF",
         "projectSH",
         "vertexMainBindless",
-        "fragmentMainBindless"
+        "fragmentMainBindless",
+        "cullScene"
     )
 }
 fn number(v: &Value, key: &str) -> Result<u32, BoxError> {
@@ -121,19 +122,57 @@ pub(crate) fn compute(
                 .as_str()
                 .ok_or("missing compute resource name")?;
             let expected = match name {
-                "source" | "panorama" => 0,
-                "exposureState" | "panoramaSampler" => 1,
-                "target" | "atlas" => 2,
-                "lut" => 3,
+                "source" | "panorama" | "cullInput" => 0,
+                "exposureState" | "panoramaSampler" | "objects" => 1,
+                "target" | "atlas" | "drawCommands" => 2,
+                "lut" | "drawCounts" => 3,
                 "sh" => 4,
                 _ => return Err("unknown compute resource role".into()),
             };
             if number(&parameter["binding"], "index")? != expected {
                 return Err("reflected compute resource binding changed".into());
             }
+            if entry == c"cullScene" {
+                let ty = &parameter["type"]["resultType"];
+                let (stride, offsets): (u32, &[(&str, u32)]) = match name {
+                    "objects" => (
+                        160,
+                        &[
+                            ("model", 0),
+                            ("inverseScaleSquaredRoughness", 64),
+                            ("baseColorMetallic", 80),
+                            ("normalParams", 96),
+                            ("emissiveOcclusion", 112),
+                            ("textures0", 128),
+                            ("textures1", 144),
+                        ],
+                    ),
+                    "cullInput" => (48, &[("minimum", 0), ("maximum", 16), ("metadata", 32)]),
+                    "drawCommands" => (
+                        20,
+                        &[
+                            ("indexCount", 0),
+                            ("instanceCount", 4),
+                            ("firstIndex", 8),
+                            ("vertexOffset", 12),
+                            ("firstInstance", 16),
+                        ],
+                    ),
+                    "drawCounts" => (4, &[]),
+                    _ => return Err("unknown culling buffer".into()),
+                };
+                if uniform_size(ty)? != stride {
+                    return Err(format!("culling buffer stride mismatch: {name}").into());
+                }
+                if !offsets.is_empty() {
+                    type_fields(ty, offsets)?;
+                }
+            }
         }
         if parameter["binding"]["kind"] == "pushConstantBuffer" {
-            if push == 48 {
+            if push == 80 {
+                fields(parameter, &[("viewProjection", 0), ("options", 64)])?;
+            } else if push == 48 {
                 fields(parameter, &[("exposure", 0), ("bloom", 16), ("timing", 32)])?;
             } else if push == 16 {
                 fields(

@@ -6,7 +6,9 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawCounts {
+    pub indirect_calls: u32,
     pub descriptor_binds: u32,
+    // With GPU culling, visibility counts describe the latest completed frame.
     pub submitted: u32,
     pub culled: u32,
     pub shadow: u32,
@@ -38,7 +40,7 @@ impl Frame {
             frame.query_pool = frame.ctx.device.create_query_pool(
                 &vk::QueryPoolCreateInfo::default()
                     .query_type(vk::QueryType::TIMESTAMP)
-                    .query_count(4),
+                    .query_count(5),
                 None,
             )?;
             frame.pool = frame.ctx.device.create_command_pool(
@@ -63,12 +65,12 @@ impl Frame {
         self.timing_enabled = true;
     }
     /// Call after the slot's timeline serial completed, before resetting queries.
-    pub fn timing(&mut self) -> Result<Option<[f64; 4]>, BoxError> {
+    pub fn timing(&mut self) -> Result<Option<[f64; 5]>, BoxError> {
         if !self.timing_enabled || self.serial == 0 || self.serial == self.measured_serial {
             return Ok(None);
         }
-        let mut values = [0_u64; 4];
-        // SAFETY: caller waited for this slot's submission, and all four queries were written.
+        let mut values = [0_u64; 5];
+        // SAFETY: caller waited for this slot's submission, and all five queries were written.
         unsafe {
             self.ctx.device.get_query_pool_results(
                 self.query_pool,
@@ -88,22 +90,27 @@ impl Frame {
             |a: usize, b: usize| ((values[b].wrapping_sub(values[a])) & mask) as f64 * scale;
         self.measured_serial = self.serial;
         Ok(Some([
-            interval(0, 3),
-            interval(0, 1),
+            interval(0, 4),
             interval(1, 2),
             interval(2, 3),
+            interval(3, 4),
+            interval(0, 1),
         ]))
     }
     pub fn record(
         &self,
         chain: &Swapchain,
         indices: (usize, usize),
-        scene: &crate::scene_gpu::SceneGpu,
+        scene: (
+            &crate::scene_gpu::SceneGpu,
+            Option<&crate::culling::Culling>,
+        ),
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
         mut ui: Option<&mut crate::ui::Ui>,
     ) -> Result<DrawCounts, BoxError> {
         let (image_index, frame_index) = indices;
+        let (scene, culling) = scene;
         let device = &self.ctx.device;
         let mut counts = DrawCounts::default();
         let frustum = govno_render::Frustum::from_view_projection(world.camera.view_projection(
@@ -127,7 +134,7 @@ impl Frame {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
             if self.timing_enabled {
-                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 4);
+                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 5);
             }
             if self.timing_enabled {
                 device.cmd_write_timestamp2(
@@ -135,6 +142,14 @@ impl Frame {
                     vk::PipelineStageFlags2::TOP_OF_PIPE,
                     self.query_pool,
                     0,
+                );
+            }
+            if self.timing_enabled && culling.is_none() {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    self.query_pool,
+                    1,
                 );
             }
             let effects = chain.post.effects.as_ref().ok_or("post effects missing")?;
@@ -165,9 +180,36 @@ impl Frame {
                 size: 16,
             };
             bindings[Resource::Objects as usize] = scene.objects_binding(frame_index);
+            if let Some(culling) = culling {
+                let [input, commands, counts, readback] = culling.bindings(frame_index);
+                bindings[Resource::CullInput as usize] = input;
+                bindings[Resource::Commands as usize] = commands;
+                bindings[Resource::Counts as usize] = counts;
+                bindings[Resource::Readback as usize] = readback;
+            }
             for pass in &chain.graph.plan.passes {
                 crate::graph::barriers(&self.ctx, self.command, pass, &bindings);
                 match pass.tag {
+                    crate::graph::Pass::ResetCull => culling
+                        .ok_or("missing culling resources")?
+                        .reset(self.command, frame_index),
+                    crate::graph::Pass::Cull => {
+                        culling
+                            .ok_or("missing culling resources")?
+                            .dispatch(self.command, frame_index);
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                1,
+                            );
+                        }
+                    }
+                    crate::graph::Pass::ReadbackCull => culling
+                        .ok_or("missing culling resources")?
+                        .copy_counts(self.command, frame_index),
+                    crate::graph::Pass::HostReadback => {}
                     crate::graph::Pass::Shadow => {
                         counts.shadow = scene.shadow().record(
                             self.command,
@@ -185,7 +227,7 @@ impl Frame {
                                 self.command,
                                 vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                                 self.query_pool,
-                                1,
+                                2,
                             );
                         }
                     }
@@ -258,52 +300,92 @@ impl Frame {
                                 &[],
                             );
                         }
-                        for (object_id, instance) in world.instances.iter().enumerate() {
-                            let mesh = meshes
-                                .get(&instance.mesh)
-                                .ok_or("stale or foreign mesh handle")?;
-                            if world.frustum_culling
-                                && mesh
-                                    .bounds
-                                    .transformed(instance.transform.matrix())
-                                    .is_some_and(|bounds| !frustum.intersects(bounds))
-                            {
-                                counts.culled += 1;
-                                continue;
-                            }
-                            counts.submitted += 1;
-                            if scene.texture_layout().is_none() {
-                                counts.descriptor_binds += 1;
-                                device.cmd_bind_descriptor_sets(
+                        if let Some(culling) = culling {
+                            let (commands, batch_counts) = culling.buffers(frame_index);
+                            for (id, batch) in culling.batches(frame_index).iter().enumerate() {
+                                let mesh = meshes.get(&batch.mesh).ok_or("stale batch mesh")?;
+                                if scene.texture_layout().is_none() {
+                                    counts.descriptor_binds += 1;
+                                    device.cmd_bind_descriptor_sets(
+                                        self.command,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        chain.pipeline.layout,
+                                        0,
+                                        &scene.descriptors(frame_index, &batch.material)?,
+                                        &[],
+                                    );
+                                }
+                                device.cmd_bind_vertex_buffers(
                                     self.command,
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    chain.pipeline.layout,
                                     0,
-                                    &scene.descriptors(frame_index, &instance.material)?,
-                                    &[],
+                                    &[mesh.vertices.handle],
+                                    &[0],
+                                );
+                                device.cmd_bind_index_buffer(
+                                    self.command,
+                                    mesh.indices.handle,
+                                    0,
+                                    vk::IndexType::UINT32,
+                                );
+                                device.cmd_draw_indexed_indirect_count(
+                                    self.command,
+                                    commands,
+                                    u64::from(batch.base) * crate::culling::COMMAND_BYTES,
+                                    batch_counts,
+                                    id as u64 * 4,
+                                    batch.capacity,
+                                    crate::culling::COMMAND_BYTES as u32,
+                                );
+                                counts.indirect_calls += 1;
+                            }
+                        } else {
+                            for (object_id, instance) in world.instances.iter().enumerate() {
+                                let mesh = meshes
+                                    .get(&instance.mesh)
+                                    .ok_or("stale or foreign mesh handle")?;
+                                if world.frustum_culling
+                                    && mesh
+                                        .bounds
+                                        .transformed(instance.transform.matrix())
+                                        .is_some_and(|bounds| !frustum.intersects(bounds))
+                                {
+                                    counts.culled += 1;
+                                    continue;
+                                }
+                                counts.submitted += 1;
+                                if scene.texture_layout().is_none() {
+                                    counts.descriptor_binds += 1;
+                                    device.cmd_bind_descriptor_sets(
+                                        self.command,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        chain.pipeline.layout,
+                                        0,
+                                        &scene.descriptors(frame_index, &instance.material)?,
+                                        &[],
+                                    );
+                                }
+
+                                device.cmd_bind_vertex_buffers(
+                                    self.command,
+                                    0,
+                                    &[mesh.vertices.handle],
+                                    &[0],
+                                );
+                                device.cmd_bind_index_buffer(
+                                    self.command,
+                                    mesh.indices.handle,
+                                    0,
+                                    vk::IndexType::UINT32,
+                                );
+                                device.cmd_draw_indexed(
+                                    self.command,
+                                    mesh.index_count,
+                                    1,
+                                    0,
+                                    0,
+                                    object_id as u32,
                                 );
                             }
-
-                            device.cmd_bind_vertex_buffers(
-                                self.command,
-                                0,
-                                &[mesh.vertices.handle],
-                                &[0],
-                            );
-                            device.cmd_bind_index_buffer(
-                                self.command,
-                                mesh.indices.handle,
-                                0,
-                                vk::IndexType::UINT32,
-                            );
-                            device.cmd_draw_indexed(
-                                self.command,
-                                mesh.index_count,
-                                1,
-                                0,
-                                0,
-                                object_id as u32,
-                            );
                         }
                         device.cmd_end_rendering(self.command);
                         if self.timing_enabled {
@@ -311,7 +393,7 @@ impl Frame {
                                 self.command,
                                 vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                                 self.query_pool,
-                                2,
+                                3,
                             );
                         }
                     }
@@ -382,7 +464,7 @@ impl Frame {
                     self.command,
                     vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                     self.query_pool,
-                    3,
+                    4,
                 );
             }
             device.end_command_buffer(self.command)?;

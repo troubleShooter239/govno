@@ -98,7 +98,7 @@ impl Swapchain {
             texture_layout,
         )?;
         let post = crate::post::PostProcess::new(memory.clone(), extent, format.format, images)?;
-        let graph = crate::graph::compile()?;
+        let graph = crate::graph::compile(ctx.gpu_culling)?;
         // SAFETY: device/surface are live, the caller quiesces the old swapchain.
         // Each child handle is recorded in its RAII owner immediately after creation.
         unsafe {

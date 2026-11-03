@@ -8,5 +8,8 @@ struct DrawData
     uint4 textures0;
     uint4 textures1;
 };
-[[vk::binding(10,0)]] StructuredBuffer<DrawData> objects;
+#ifndef GOVNO_OBJECTS_BINDING
+#define GOVNO_OBJECTS_BINDING 10
+#endif
+[[vk::binding(GOVNO_OBJECTS_BINDING,0)]] StructuredBuffer<DrawData> objects;
 

@@ -90,6 +90,7 @@ impl Drop for SurfaceContext {
 }
 pub(crate) struct DeviceContext {
     pub bindless: bool,
+    pub gpu_culling: bool,
     surface: Arc<SurfaceContext>,
     pub device: ash::Device,
     pub swapchain: ash::khr::swapchain::Device,
@@ -177,10 +178,10 @@ impl Drop for DeviceContext {
 
 pub(crate) fn create_device(
     window: Arc<dyn SurfaceTarget>,
-    validation: bool,
+    options: crate::RendererOptions,
     stats: Arc<ValidationStats>,
-    bindless_requested: bool,
 ) -> Result<Arc<DeviceContext>, BoxError> {
+    let validation = options.validation;
     // SAFETY: loader lifetime is retained by InstanceContext. All Vulkan handles
     // created below are immediately transferred to RAII owners on success.
     unsafe {
@@ -367,7 +368,13 @@ pub(crate) fn create_device(
                 tracing::warn!(%name,"GPU rejected: Modern profile requirements not met");
                 continue;
             }
-            let bindless = bindless_requested && capabilities.bindless_capacity > 0;
+            let bindless = options.bindless && capabilities.bindless_capacity > 0;
+            let gpu_culling = options.gpu_culling && capabilities.gpu_culling;
+            if options.verify_culling && !gpu_culling {
+                return Err(
+                    "GPU culling verification requires supported and enabled GPU culling".into(),
+                );
+            }
             if !bindless && !capabilities.legacy_materials {
                 tracing::warn!(%name,"GPU rejected: legacy material layouts require 8 storage-buffer descriptors");
                 continue;
@@ -387,6 +394,7 @@ pub(crate) fn create_device(
                     .swapchain_maintenance1(true);
             let mut enabled_v12 = vk::PhysicalDeviceVulkan12Features::default()
                 .timeline_semaphore(true)
+                .draw_indirect_count(gpu_culling)
                 .runtime_descriptor_array(bindless)
                 .descriptor_binding_partially_bound(bindless)
                 .shader_sampled_image_array_non_uniform_indexing(bindless);
@@ -396,7 +404,11 @@ pub(crate) fn create_device(
             if present_fences {
                 device_extensions.push(ash::ext::swapchain_maintenance1::NAME.as_ptr());
             }
+            let core_features = vk::PhysicalDeviceFeatures::default()
+                .multi_draw_indirect(gpu_culling)
+                .draw_indirect_first_instance(gpu_culling);
             let mut device_info = vk::DeviceCreateInfo::default()
+                .enabled_features(&core_features)
                 .queue_create_infos(&queues)
                 .enabled_extension_names(&device_extensions)
                 .push_next(&mut enabled_v13)
@@ -408,7 +420,7 @@ pub(crate) fn create_device(
             let queue = device.get_device_queue(family, 0);
             let swapchain = ash::khr::swapchain::Device::new(instance, &device);
             tracing::info!(gpu = %name, api_major = vk::api_version_major(properties.api_version),
-                api_minor = vk::api_version_minor(properties.api_version), api=%version_string(properties.api_version), present_fences, validation, "Vulkan device selected");
+                api_minor = vk::api_version_minor(properties.api_version), api=%version_string(properties.api_version), present_fences, validation, bindless, gpu_culling, "Vulkan device selected");
             if !present_fences {
                 tracing::warn!(
                     "No swapchain maintenance1: resize/shutdown use conventional device-idle WSI fallback"
@@ -416,6 +428,7 @@ pub(crate) fn create_device(
             }
             let mut owner = DeviceContext {
                 bindless,
+                gpu_culling,
                 surface,
                 device,
                 physical,

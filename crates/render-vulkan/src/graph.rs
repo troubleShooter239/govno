@@ -12,6 +12,10 @@ pub(crate) struct ResourceState {
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pass {
+    ResetCull,
+    Cull,
+    ReadbackCull,
+    HostReadback,
     Shadow,
     Forward,
     Effects(crate::effects::EffectPass),
@@ -29,8 +33,12 @@ pub(crate) enum Resource {
     Scratch,
     Exposure,
     Objects,
+    CullInput,
+    Commands,
+    Counts,
+    Readback,
 }
-pub(crate) const RESOURCE_COUNT: usize = 8;
+pub(crate) const RESOURCE_COUNT: usize = 12;
 pub(crate) struct FrameGraph {
     pub plan: CompiledGraph<ResourceState, Pass>,
     pub lifetimes: [Option<Lifetime>; RESOURCE_COUNT],
@@ -38,12 +46,12 @@ pub(crate) struct FrameGraph {
 impl FrameGraph {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"passes":self.plan.passes.iter().map(|p|p.name.as_str()).collect::<Vec<_>>(),
-            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects"]
+            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects","cull_input","indirect_commands","draw_counts","draw_readback"]
                 .into_iter().zip(&self.lifetimes).map(|(name,lifetime)|
                 serde_json::json!({"name":name,"first":lifetime.map(|l|l.first),"last":lifetime.map(|l|l.last)})).collect::<Vec<_>>())})
     }
 }
-pub(crate) fn compile() -> Result<FrameGraph, BoxError> {
+pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
     use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
     let state = |stages, access, layout| ResourceState {
         stages,
@@ -113,11 +121,50 @@ pub(crate) fn compile() -> Result<FrameGraph, BoxError> {
         state(S::HOST, A::HOST_WRITE, L::UNDEFINED),
         true,
     );
+    let input = graph.resource(
+        "Culling input",
+        state(S::HOST, A::HOST_WRITE, L::UNDEFINED),
+        true,
+    );
+    let commands = graph.resource("Indirect commands", undefined, false);
+    let counts = graph.resource("Batch counts", undefined, false);
+    let readback = graph.resource(
+        "Culling readback",
+        state(S::HOST, A::HOST_READ, L::UNDEFINED),
+        true,
+    );
+    let compute_read = state(S::COMPUTE_SHADER, A::SHADER_STORAGE_READ, L::UNDEFINED);
+    let indirect_read = state(S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ, L::UNDEFINED);
     let usage = |resource, state, access| Use {
         resource,
         state,
         access,
     };
+    if gpu_culling {
+        graph.pass(
+            "Reset culling counts",
+            Pass::ResetCull,
+            vec![usage(
+                counts,
+                state(S::TRANSFER, A::TRANSFER_WRITE, L::UNDEFINED),
+                Access::Write,
+            )],
+        );
+        graph.pass(
+            "Frustum culling and command compaction",
+            Pass::Cull,
+            vec![
+                usage(input, compute_read, Access::Read),
+                usage(objects, compute_read, Access::Read),
+                usage(
+                    commands,
+                    state(S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, L::UNDEFINED),
+                    Access::Write,
+                ),
+                usage(counts, exposure_write, Access::ReadWrite),
+            ],
+        );
+    }
     graph.pass(
         "Cascaded shadow atlas",
         Pass::Shadow,
@@ -134,24 +181,27 @@ pub(crate) fn compile() -> Result<FrameGraph, BoxError> {
             ),
         ],
     );
-    graph.pass(
-        "Forward PBR",
-        Pass::Forward,
-        vec![
-            usage(hdr, color, Access::Write),
-            usage(depth_image, depth, Access::Write),
-            usage(shadow, shadow_read, Access::Read),
-            usage(
-                objects,
-                state(
-                    S::VERTEX_SHADER | S::FRAGMENT_SHADER,
-                    A::SHADER_STORAGE_READ,
-                    L::UNDEFINED,
-                ),
-                Access::Read,
+    let mut forward_uses = vec![
+        usage(hdr, color, Access::Write),
+        usage(depth_image, depth, Access::Write),
+        usage(shadow, shadow_read, Access::Read),
+        usage(
+            objects,
+            state(
+                S::VERTEX_SHADER | S::FRAGMENT_SHADER,
+                A::SHADER_STORAGE_READ,
+                L::UNDEFINED,
             ),
-        ],
-    );
+            Access::Read,
+        ),
+    ];
+    if gpu_culling {
+        forward_uses.extend([
+            usage(commands, indirect_read, Access::Read),
+            usage(counts, indirect_read, Access::Read),
+        ]);
+    }
+    graph.pass("Forward PBR", Pass::Forward, forward_uses);
     graph.pass(
         "Exposure",
         Pass::Effects(crate::effects::EffectPass::Exposure),
@@ -195,6 +245,33 @@ pub(crate) fn compile() -> Result<FrameGraph, BoxError> {
             usage(output, color, Access::Write),
         ],
     );
+    if gpu_culling {
+        graph.pass(
+            "Copy culling counters",
+            Pass::ReadbackCull,
+            vec![
+                usage(
+                    counts,
+                    state(S::TRANSFER, A::TRANSFER_READ, L::UNDEFINED),
+                    Access::Read,
+                ),
+                usage(
+                    readback,
+                    state(S::TRANSFER, A::TRANSFER_WRITE, L::UNDEFINED),
+                    Access::Write,
+                ),
+            ],
+        );
+        graph.pass(
+            "Culling host readback",
+            Pass::HostReadback,
+            vec![usage(
+                readback,
+                state(S::HOST, A::HOST_READ, L::UNDEFINED),
+                Access::Read,
+            )],
+        );
+    }
     graph.pass(
         "Present",
         Pass::Present,
@@ -209,6 +286,10 @@ pub(crate) fn compile() -> Result<FrameGraph, BoxError> {
         scratch,
         exposure,
         objects,
+        input,
+        commands,
+        counts,
+        readback,
     ];
     let plan = graph.compile()?;
     let lifetimes = resources.map(|r| plan.lifetime(r));

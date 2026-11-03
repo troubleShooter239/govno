@@ -84,6 +84,8 @@ fn main() -> Result<(), BoxError> {
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
     let mut bindless = true;
+    let mut gpu_culling = true;
+    let mut verify_culling = false;
     let mut gltf_path = None;
     let mut scene_path = None;
     let mut environment_path = None;
@@ -179,9 +181,11 @@ fn main() -> Result<(), BoxError> {
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--no-bindless" => bindless = false,
+            "--no-gpu-culling" => gpu_culling = false,
+            "--verify-culling" => verify_culling = true,
             "--help" => {
                 println!(
-                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation] [--no-bindless]"
+                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation] [--no-bindless] [--no-gpu-culling] [--verify-culling]"
                 );
                 return Ok(());
             }
@@ -242,9 +246,13 @@ fn main() -> Result<(), BoxError> {
                     width: size.width,
                     height: size.height,
                 },
-                validation,
+                govno_render_vulkan::RendererOptions {
+                    validation,
+                    bindless,
+                    gpu_culling,
+                    verify_culling,
+                },
                 callback_stats,
-                bindless,
             )?;
             if benchmark_path.is_some() {
                 renderer.start_benchmark();
