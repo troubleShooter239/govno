@@ -22,6 +22,7 @@ impl PostProcess {
         memory: Rc<Memory>,
         extent: vk::Extent2D,
         output_format: vk::Format,
+        images: &mut crate::transient::ImagePool,
     ) -> Result<Self, BoxError> {
         // SAFETY: physical device belongs to the retained instance.
         let features = unsafe {
@@ -46,14 +47,13 @@ impl PostProcess {
             pipeline: None,
         };
         for _ in 0..2 {
-            owner
-                .targets
-                .push(ImageResource::hdr(memory.clone(), extent)?);
+            owner.targets.push(images.hdr(extent)?);
         }
         owner.effects = Some(crate::effects::Effects::new(
             memory.clone(),
             extent,
             &owner.targets,
+            images,
         )?);
         // SAFETY: all successful handles are immediately owned. Descriptors are
         // initialized before use and remain immutable for the swapchain lifetime.

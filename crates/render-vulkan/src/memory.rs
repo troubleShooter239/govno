@@ -237,25 +237,41 @@ impl Drop for Buffer {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ImageDescriptor {
+    pub extent: vk::Extent2D,
+    pub format: vk::Format,
+    pub usage: vk::ImageUsageFlags,
+    pub range: vk::ImageSubresourceRange,
+}
+impl PartialEq for ImageDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        let range = |r: vk::ImageSubresourceRange| {
+            [
+                r.aspect_mask.as_raw(),
+                r.base_mip_level,
+                r.level_count,
+                r.base_array_layer,
+                r.layer_count,
+            ]
+        };
+        self.extent == other.extent
+            && self.format == other.format
+            && self.usage == other.usage
+            && range(self.range) == range(other.range)
+    }
+}
+impl Eq for ImageDescriptor {}
 pub(crate) struct ImageResource {
+    pub descriptor: ImageDescriptor,
     memory: Rc<Memory>,
     pub image: vk::Image,
     pub view: vk::ImageView,
     allocation: Option<Allocation>,
 }
 impl ImageResource {
-    pub fn new(
-        memory: Rc<Memory>,
-        extent: vk::Extent2D,
-        format: vk::Format,
-    ) -> Result<Self, BoxError> {
-        Self::with_usage(
-            memory,
-            extent,
-            format,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            depth_range(),
-        )
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocation.as_ref().map_or(0, |a| a.size())
     }
     pub fn shadow(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
         Self::with_usage(
@@ -264,15 +280,6 @@ impl ImageResource {
             vk::Format::D32_SFLOAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             depth_range(),
-        )
-    }
-    pub fn hdr(memory: Rc<Memory>, extent: vk::Extent2D) -> Result<Self, BoxError> {
-        Self::with_usage(
-            memory,
-            extent,
-            vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-            crate::swapchain::color_range(),
         )
     }
     pub fn sampled(
@@ -299,6 +306,12 @@ impl ImageResource {
         range: vk::ImageSubresourceRange,
     ) -> Result<Self, BoxError> {
         let mut owner = Self {
+            descriptor: ImageDescriptor {
+                extent,
+                format,
+                usage,
+                range,
+            },
             memory,
             image: vk::Image::null(),
             view: vk::ImageView::null(),

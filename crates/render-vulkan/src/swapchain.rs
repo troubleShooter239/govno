@@ -35,6 +35,7 @@ pub(crate) fn image_count(caps: &vk::SurfaceCapabilitiesKHR) -> u32 {
     }
 }
 pub(crate) struct Swapchain {
+    pub graph: crate::graph::FrameGraph,
     pub format: vk::Format,
     pub ctx: Arc<DeviceContext>,
     pub handle: vk::SwapchainKHR,
@@ -55,6 +56,8 @@ impl Swapchain {
         requested: RenderExtent,
         old: vk::SwapchainKHR,
         scene_layout: vk::DescriptorSetLayout,
+        texture_layout: Option<vk::DescriptorSetLayout>,
+        images: &mut crate::transient::ImagePool,
     ) -> Result<Option<Self>, BoxError> {
         let ctx = memory.ctx.clone();
         let depth_format = ctx.depth_format()?;
@@ -92,13 +95,16 @@ impl Swapchain {
             crate::post::HDR_FORMAT,
             depth_format,
             scene_layout,
+            texture_layout,
         )?;
-        let post = crate::post::PostProcess::new(memory.clone(), extent, format.format)?;
+        let post = crate::post::PostProcess::new(memory.clone(), extent, format.format, images)?;
+        let graph = crate::graph::compile()?;
         // SAFETY: device/surface are live, the caller quiesces the old swapchain.
         // Each child handle is recorded in its RAII owner immediately after creation.
         unsafe {
             let handle = ctx.swapchain.create_swapchain(&info, None)?;
             let mut chain = Self {
+                graph,
                 format: format.format,
                 ctx,
                 handle,
@@ -117,11 +123,7 @@ impl Swapchain {
                 ),
             };
             for _ in 0..2 {
-                chain.depth.push(crate::memory::ImageResource::new(
-                    memory.clone(),
-                    extent,
-                    depth_format,
-                )?);
+                chain.depth.push(images.depth(extent, depth_format)?);
             }
             chain.images = chain.ctx.swapchain.get_swapchain_images(handle)?;
             for image in &chain.images {
@@ -158,6 +160,21 @@ impl Swapchain {
             );
             Ok(Some(chain))
         }
+    }
+    pub fn recycle_targets(
+        &mut self,
+        images: &mut crate::transient::ImagePool,
+    ) -> Result<(), BoxError> {
+        self.quiesce()?;
+        for image in self.depth.drain(..).chain(self.post.targets.drain(..)) {
+            images.recycle(image);
+        }
+        if let Some(effects) = &mut self.post.effects {
+            for image in effects.bloom.drain(..).chain(effects.scratch.drain(..)) {
+                images.recycle(image);
+            }
+        }
+        Ok(())
     }
     pub fn quiesce(&mut self) -> Result<(), BoxError> {
         self.ctx.wait_idle()?;

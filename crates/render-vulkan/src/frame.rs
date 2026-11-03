@@ -1,10 +1,4 @@
-use crate::{
-    context::DeviceContext,
-    memory::depth_range,
-    mesh::GpuMesh,
-    scene_gpu::draw_constants,
-    swapchain::{Swapchain, color_range},
-};
+use crate::{context::DeviceContext, mesh::GpuMesh, swapchain::Swapchain};
 use ash::vk;
 use govno_core::BoxError;
 use govno_render::{MeshHandle, RenderWorld};
@@ -12,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawCounts {
+    pub descriptor_binds: u32,
     pub submitted: u32,
     pub culled: u32,
     pub shadow: u32,
@@ -106,7 +101,7 @@ impl Frame {
         scene: &crate::scene_gpu::SceneGpu,
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
-        ui: Option<&mut crate::ui::Ui>,
+        mut ui: Option<&mut crate::ui::Ui>,
     ) -> Result<DrawCounts, BoxError> {
         let (image_index, frame_index) = indices;
         let device = &self.ctx.device;
@@ -142,257 +137,246 @@ impl Frame {
                     0,
                 );
             }
-            counts.shadow = scene.shadow.record(
-                self.command,
-                frame_index,
-                world,
-                meshes,
-                govno_render::RenderExtent {
-                    width: extent.width,
-                    height: extent.height,
-                },
-            )?;
-            if self.timing_enabled {
-                device.cmd_write_timestamp2(
-                    self.command,
-                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                    self.query_pool,
-                    1,
-                );
-            }
-            let barriers = [
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(hdr.image)
-                    .subresource_range(color_range()),
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(
-                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                    )
-                    .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                    .dst_stage_mask(
-                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                    )
-                    .dst_access_mask(
-                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
-                            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(depth.image)
-                    .subresource_range(depth_range()),
-            ];
-            device.cmd_pipeline_barrier2(
-                self.command,
-                &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+            let effects = chain.post.effects.as_ref().ok_or("post effects missing")?;
+            use crate::graph::{Binding, RESOURCE_COUNT, Resource};
+            let mut bindings = [Binding::Image {
+                handle: image,
+                range: crate::swapchain::color_range(),
+            }; RESOURCE_COUNT];
+            bindings[Resource::Output as usize] = Binding::Image {
+                handle: image,
+                range: crate::swapchain::color_range(),
+            };
+            bindings[Resource::Hdr as usize] = Binding::image(hdr, crate::swapchain::color_range());
+            bindings[Resource::Depth as usize] =
+                Binding::image(depth, crate::memory::depth_range());
+            bindings[Resource::Shadow as usize] = Binding::image(
+                &scene.shadow().images[frame_index],
+                crate::memory::depth_range(),
             );
-            let colors = [vk::RenderingAttachmentInfo::default()
-                .image_view(hdr.view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.018, 0.025, 0.045, 1.0],
-                    },
-                })];
-            let depth_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(depth.view)
-                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 0.0,
-                        stencil: 0,
-                    },
-                });
-            device.cmd_begin_rendering(
-                self.command,
-                &vk::RenderingInfo::default()
-                    .render_area(vk::Rect2D {
-                        offset: vk::Offset2D::default(),
-                        extent,
-                    })
-                    .layer_count(1)
-                    .color_attachments(&colors)
-                    .depth_attachment(&depth_attachment),
+            bindings[Resource::Bloom as usize] =
+                Binding::image(&effects.bloom[frame_index], crate::swapchain::color_range());
+            bindings[Resource::Scratch as usize] = Binding::image(
+                &effects.scratch[frame_index],
+                crate::swapchain::color_range(),
             );
-            device.cmd_bind_pipeline(
-                self.command,
-                vk::PipelineBindPoint::GRAPHICS,
-                chain.pipeline.pipeline,
-            );
-            device.cmd_set_viewport(
-                self.command,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: extent.width as f32,
-                    height: extent.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            device.cmd_set_scissor(
-                self.command,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D::default(),
-                    extent,
-                }],
-            );
-            for instance in &world.instances {
-                let mesh = meshes
-                    .get(&instance.mesh)
-                    .ok_or("stale or foreign mesh handle")?;
-                if world.frustum_culling
-                    && mesh
-                        .bounds
-                        .transformed(instance.transform.matrix())
-                        .is_some_and(|bounds| !frustum.intersects(bounds))
-                {
-                    counts.culled += 1;
-                    continue;
-                }
-                counts.submitted += 1;
-                device.cmd_bind_descriptor_sets(
-                    self.command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    chain.pipeline.layout,
-                    0,
-                    &scene.descriptors(frame_index, &instance.material)?,
-                    &[],
-                );
+            bindings[Resource::Exposure as usize] = Binding::Buffer {
+                handle: effects.exposure.handle,
+                size: 16,
+            };
+            bindings[Resource::Objects as usize] = scene.objects_binding(frame_index);
+            for pass in &chain.graph.plan.passes {
+                crate::graph::barriers(&self.ctx, self.command, pass, &bindings);
+                match pass.tag {
+                    crate::graph::Pass::Shadow => {
+                        counts.shadow = scene.shadow().record(
+                            self.command,
+                            frame_index,
+                            world,
+                            meshes,
+                            govno_render::RenderExtent {
+                                width: extent.width,
+                                height: extent.height,
+                            },
+                            scene.sets[frame_index],
+                        )?;
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                1,
+                            );
+                        }
+                    }
+                    crate::graph::Pass::Forward => {
+                        let colors = [vk::RenderingAttachmentInfo::default()
+                            .image_view(hdr.view)
+                            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                            .load_op(vk::AttachmentLoadOp::CLEAR)
+                            .store_op(vk::AttachmentStoreOp::STORE)
+                            .clear_value(vk::ClearValue {
+                                color: vk::ClearColorValue {
+                                    float32: [0.018, 0.025, 0.045, 1.0],
+                                },
+                            })];
+                        let depth_attachment = vk::RenderingAttachmentInfo::default()
+                            .image_view(depth.view)
+                            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                            .load_op(vk::AttachmentLoadOp::CLEAR)
+                            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                            .clear_value(vk::ClearValue {
+                                depth_stencil: vk::ClearDepthStencilValue {
+                                    depth: 0.0,
+                                    stencil: 0,
+                                },
+                            });
+                        device.cmd_begin_rendering(
+                            self.command,
+                            &vk::RenderingInfo::default()
+                                .render_area(vk::Rect2D {
+                                    offset: vk::Offset2D::default(),
+                                    extent,
+                                })
+                                .layer_count(1)
+                                .color_attachments(&colors)
+                                .depth_attachment(&depth_attachment),
+                        );
+                        device.cmd_bind_pipeline(
+                            self.command,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            chain.pipeline.pipeline,
+                        );
+                        device.cmd_set_viewport(
+                            self.command,
+                            0,
+                            &[vk::Viewport {
+                                x: 0.0,
+                                y: 0.0,
+                                width: extent.width as f32,
+                                height: extent.height as f32,
+                                min_depth: 0.0,
+                                max_depth: 1.0,
+                            }],
+                        );
+                        device.cmd_set_scissor(
+                            self.command,
+                            0,
+                            &[vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent,
+                            }],
+                        );
+                        if let Some(sets) = scene.global_sets(frame_index) {
+                            counts.descriptor_binds += 1;
+                            device.cmd_bind_descriptor_sets(
+                                self.command,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                chain.pipeline.layout,
+                                0,
+                                &sets,
+                                &[],
+                            );
+                        }
+                        for (object_id, instance) in world.instances.iter().enumerate() {
+                            let mesh = meshes
+                                .get(&instance.mesh)
+                                .ok_or("stale or foreign mesh handle")?;
+                            if world.frustum_culling
+                                && mesh
+                                    .bounds
+                                    .transformed(instance.transform.matrix())
+                                    .is_some_and(|bounds| !frustum.intersects(bounds))
+                            {
+                                counts.culled += 1;
+                                continue;
+                            }
+                            counts.submitted += 1;
+                            if scene.texture_layout().is_none() {
+                                counts.descriptor_binds += 1;
+                                device.cmd_bind_descriptor_sets(
+                                    self.command,
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    chain.pipeline.layout,
+                                    0,
+                                    &scene.descriptors(frame_index, &instance.material)?,
+                                    &[],
+                                );
+                            }
 
-                device.cmd_bind_vertex_buffers(self.command, 0, &[mesh.vertices.handle], &[0]);
-                device.cmd_bind_index_buffer(
-                    self.command,
-                    mesh.indices.handle,
-                    0,
-                    vk::IndexType::UINT32,
-                );
-                device.cmd_push_constants(
-                    self.command,
-                    chain.pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    &draw_constants(instance),
-                );
-                device.cmd_draw_indexed(self.command, mesh.index_count, 1, 0, 0, 0);
+                            device.cmd_bind_vertex_buffers(
+                                self.command,
+                                0,
+                                &[mesh.vertices.handle],
+                                &[0],
+                            );
+                            device.cmd_bind_index_buffer(
+                                self.command,
+                                mesh.indices.handle,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            device.cmd_draw_indexed(
+                                self.command,
+                                mesh.index_count,
+                                1,
+                                0,
+                                0,
+                                object_id as u32,
+                            );
+                        }
+                        device.cmd_end_rendering(self.command);
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                2,
+                            );
+                        }
+                    }
+                    crate::graph::Pass::Effects(effect) => {
+                        chain
+                            .post
+                            .effects
+                            .as_ref()
+                            .ok_or("post effects missing")?
+                            .record(effect, self.command, frame_index, world.post_process);
+                    }
+                    crate::graph::Pass::Composite => {
+                        let output = [vk::RenderingAttachmentInfo::default()
+                            .image_view(chain.views[image_index])
+                            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                            .store_op(vk::AttachmentStoreOp::STORE)];
+                        device.cmd_begin_rendering(
+                            self.command,
+                            &vk::RenderingInfo::default()
+                                .render_area(vk::Rect2D {
+                                    offset: Default::default(),
+                                    extent,
+                                })
+                                .layer_count(1)
+                                .color_attachments(&output),
+                        );
+                        let post = chain
+                            .post
+                            .pipeline
+                            .as_ref()
+                            .ok_or("post pipeline not initialized")?;
+                        device.cmd_bind_pipeline(
+                            self.command,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            post.pipeline,
+                        );
+                        device.cmd_bind_descriptor_sets(
+                            self.command,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            post.layout,
+                            0,
+                            &[chain.post.sets[frame_index]],
+                            &[],
+                        );
+                        let output = crate::post::output_constants(
+                            world.post_process,
+                            chain.srgb_attachment,
+                        );
+                        device.cmd_push_constants(
+                            self.command,
+                            post.layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            &output,
+                        );
+                        device.cmd_draw(self.command, 3, 1, 0, 0);
+                        if let Some(ui) = ui.as_deref_mut() {
+                            ui.record(frame_index, self.command, extent)?;
+                        }
+                        device.cmd_end_rendering(self.command);
+                    }
+                    crate::graph::Pass::Present => {}
+                }
             }
-            device.cmd_end_rendering(self.command);
-            if self.timing_enabled {
-                device.cmd_write_timestamp2(
-                    self.command,
-                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                    self.query_pool,
-                    2,
-                );
-            }
-            let ready = [
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                    .dst_stage_mask(
-                        vk::PipelineStageFlags2::FRAGMENT_SHADER
-                            | vk::PipelineStageFlags2::COMPUTE_SHADER,
-                    )
-                    .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(hdr.image)
-                    .subresource_range(color_range())
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .image(image)
-                    .subresource_range(color_range())
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED),
-            ];
-            device.cmd_pipeline_barrier2(
-                self.command,
-                &vk::DependencyInfo::default().image_memory_barriers(&ready),
-            );
-            chain
-                .post
-                .effects
-                .as_ref()
-                .ok_or("post effects missing")?
-                .record(self.command, frame_index, world.post_process);
-            let output = [vk::RenderingAttachmentInfo::default()
-                .image_view(chain.views[image_index])
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .store_op(vk::AttachmentStoreOp::STORE)];
-            device.cmd_begin_rendering(
-                self.command,
-                &vk::RenderingInfo::default()
-                    .render_area(vk::Rect2D {
-                        offset: Default::default(),
-                        extent,
-                    })
-                    .layer_count(1)
-                    .color_attachments(&output),
-            );
-            let post = chain
-                .post
-                .pipeline
-                .as_ref()
-                .ok_or("post pipeline not initialized")?;
-            device.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::GRAPHICS, post.pipeline);
-            device.cmd_bind_descriptor_sets(
-                self.command,
-                vk::PipelineBindPoint::GRAPHICS,
-                post.layout,
-                0,
-                &[chain.post.sets[frame_index]],
-                &[],
-            );
-            let output = crate::post::output_constants(world.post_process, chain.srgb_attachment);
-            device.cmd_push_constants(
-                self.command,
-                post.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                &output,
-            );
-            device.cmd_draw(self.command, 3, 1, 0, 0);
-            if let Some(ui) = ui {
-                ui.record(frame_index, self.command, extent)?;
-            }
-            device.cmd_end_rendering(self.command);
-            let to_present = [vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::NONE)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
-                .subresource_range(color_range())];
-            device.cmd_pipeline_barrier2(
-                self.command,
-                &vk::DependencyInfo::default().image_memory_barriers(&to_present),
-            );
             if self.timing_enabled {
                 device.cmd_write_timestamp2(
                     self.command,

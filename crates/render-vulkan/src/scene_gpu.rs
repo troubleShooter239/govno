@@ -10,9 +10,11 @@ use std::{rc::Rc, sync::Arc};
 
 pub(crate) const CAMERA_BYTES: u64 =
     112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144 + 16 + 288 + 96;
-pub(crate) const DRAW_BYTES: u32 = 128;
+const OBJECT_PARAMETERS_BYTES: usize = 128;
+pub(crate) const OBJECT_BYTES: u64 = 160;
 pub(crate) struct SceneGpu {
-    pub shadow: crate::shadow::ShadowMap,
+    bindless: Option<crate::bindless::Bindless>,
+    shadow: Option<crate::shadow::ShadowMap>,
     specular: crate::specular::SpecularGpu,
     loaded_probes: [bool; 3],
     ctx: Arc<DeviceContext>,
@@ -20,6 +22,10 @@ pub(crate) struct SceneGpu {
     pool: vk::DescriptorPool,
     pub sets: Vec<vk::DescriptorSet>,
     cameras: Vec<Buffer>,
+    objects: Vec<Buffer>,
+    object_capacities: Vec<usize>,
+    object_counts: Vec<usize>,
+    object_bytes: Vec<u8>,
     texture: Option<crate::texture::Texture>,
     extras: std::collections::HashMap<
         (
@@ -35,7 +41,12 @@ pub(crate) struct SceneGpu {
 impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
         let mut owner = Self {
-            shadow: crate::shadow::ShadowMap::new(memory.clone())?,
+            bindless: if memory.ctx.bindless {
+                Some(crate::bindless::Bindless::new(memory.ctx.clone(), frames)?)
+            } else {
+                None
+            },
+            shadow: None,
             specular: crate::specular::SpecularGpu::new(memory.clone())?,
             loaded_probes: [false, false, false],
             ctx: memory.ctx.clone(),
@@ -43,6 +54,10 @@ impl SceneGpu {
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
             cameras: Vec::new(),
+            objects: Vec::new(),
+            object_capacities: Vec::new(),
+            object_counts: vec![0; frames as usize],
+            object_bytes: Vec::new(),
             texture: None,
             extras: Default::default(),
             retired_extras: Default::default(),
@@ -50,6 +65,13 @@ impl SceneGpu {
             textures: Default::default(),
         };
         for _ in 0..frames {
+            owner.objects.push(Buffer::new(
+                memory.clone(),
+                OBJECT_BYTES * 64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::CpuToGpu,
+            )?);
+            owner.object_capacities.push(64);
             owner.cameras.push(Buffer::new(
                 memory.clone(),
                 CAMERA_BYTES,
@@ -58,6 +80,11 @@ impl SceneGpu {
             )?);
         }
         let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(10)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(9)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -119,7 +146,7 @@ impl SceneGpu {
             let sizes = [
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(frames),
+                    .descriptor_count(frames * 2),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(frames),
@@ -156,7 +183,11 @@ impl SceneGpu {
                 );
             }
         }
-        owner.shadow.bind_images(&owner.sets);
+        owner.shadow = Some(crate::shadow::ShadowMap::new(memory.clone(), owner.layout)?);
+        owner.shadow().bind_images(&owner.sets);
+        for frame in 0..frames as usize {
+            owner.bind_objects(frame);
+        }
         owner.specular.bind(&owner.sets);
         owner.set_texture(&govno_render::TextureData {
             color_space: Default::default(),
@@ -237,6 +268,10 @@ impl SceneGpu {
                 );
             }
         }
+        if let Some(table) = &mut self.bindless {
+            table.replace_all(0, &texture);
+            table.changed();
+        }
         self.texture = Some(texture);
         Ok(())
     }
@@ -247,11 +282,128 @@ impl SceneGpu {
         world: &RenderWorld,
         extent: RenderExtent,
     ) -> Result<(), BoxError> {
-        self.cameras[frame].write(&frame_constants(world, extent, self.loaded_probes[0])?)
+        self.cameras[frame].write(&frame_constants(world, extent, self.loaded_probes[0])?)?;
+        self.update_objects(frame, world)?;
+        if let Some(table) = &mut self.bindless {
+            table.update(
+                frame,
+                self.texture.as_ref().ok_or("missing default texture")?,
+                self.textures
+                    .values()
+                    .map(|slot| (slot.index, &slot._texture)),
+            );
+        }
+        Ok(())
+    }
+    fn bind_objects(&self, frame: usize) {
+        let bind = |set| {
+            let info = [vk::DescriptorBufferInfo::default()
+                .buffer(self.objects[frame].handle)
+                .range(self.object_capacities[frame] as u64 * OBJECT_BYTES)];
+            // SAFETY: only this completed frame slot is changed; the buffer remains
+            // owned through its next submission, including when its capacity grows.
+            unsafe {
+                self.ctx.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(10)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&info)],
+                    &[],
+                );
+            }
+        };
+        bind(self.sets[frame]);
+        for slot in self.textures.values() {
+            if let Some(&set) = slot.sets.get(frame) {
+                bind(set);
+            }
+        }
+    }
+    fn update_objects(&mut self, frame: usize, world: &RenderWorld) -> Result<(), BoxError> {
+        let limit = self.ctx.capabilities.max_storage_buffer_range as usize / OBJECT_BYTES as usize;
+        let count = world.instances.len();
+        if count > limit || count > u32::MAX as usize {
+            return Err("GPU Scene exceeds storage-buffer/object-index limits".into());
+        }
+        if count > self.object_capacities[frame] {
+            let capacity = count.next_power_of_two().min(limit);
+            let buffer = Buffer::new(
+                self.memory.clone(),
+                capacity as u64 * OBJECT_BYTES,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::CpuToGpu,
+            )?;
+            self.objects[frame] = buffer;
+            self.object_capacities[frame] = capacity;
+            self.bind_objects(frame);
+        }
+        self.object_bytes.clear();
+        for instance in &world.instances {
+            self.object_bytes
+                .extend_from_slice(&encode_object_parameters(instance));
+            // Texture indices are stable until quiesced removal; handles stay CPU-only.
+            let m = &instance.material;
+            let index =
+                |handle: Option<govno_render::TextureHandle>, fallback| -> Result<u32, BoxError> {
+                    match handle {
+                        Some(h) => Ok(self
+                            .textures
+                            .get(&h)
+                            .ok_or("stale GPU Scene texture")?
+                            .index),
+                        None => Ok(fallback),
+                    }
+                };
+            let indices = if self.bindless.is_some() {
+                [
+                    index(m.base_color_texture, 0)?,
+                    index(m.normal_texture, 1)?,
+                    index(m.metallic_roughness_texture, 2)?,
+                    index(m.emissive_texture, 3)?,
+                    index(m.occlusion_texture, 2)?,
+                    0,
+                    0,
+                    0,
+                ]
+            } else {
+                [0; 8]
+            };
+            for index in indices {
+                self.object_bytes.extend_from_slice(&index.to_ne_bytes());
+            }
+        }
+        if count > 0 {
+            self.objects[frame].write(&self.object_bytes)?;
+        }
+        self.object_counts[frame] = count;
+        Ok(())
+    }
+    pub fn report(&self) -> serde_json::Value {
+        serde_json::json!({"object_stride":OBJECT_BYTES,"frame_objects":self.object_counts,"frame_capacities":self.object_capacities,
+            "bindless":self.bindless.as_ref().map(|t|t.report())})
+    }
+    pub fn shadow(&self) -> &crate::shadow::ShadowMap {
+        self.shadow.as_ref().expect("shadow initialized")
+    }
+    pub fn texture_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        self.bindless.as_ref().map(|t| t.layout)
+    }
+    pub fn objects_binding(&self, frame: usize) -> crate::graph::Binding {
+        crate::graph::Binding::Buffer {
+            handle: self.objects[frame].handle,
+            size: self.object_capacities[frame] as u64 * OBJECT_BYTES,
+        }
+    }
+    pub fn global_sets(&self, frame: usize) -> Option<[vk::DescriptorSet; 2]> {
+        self.bindless
+            .as_ref()
+            .map(|t| [self.sets[frame], t.sets[frame]])
     }
 }
 impl Drop for SceneGpu {
     fn drop(&mut self) {
+        self.shadow.take();
         // SAFETY: renderer has waited for all referencing submissions and dropped
         // pipelines before these shared bindings. Pool owns its descriptor sets.
         unsafe {
@@ -262,7 +414,7 @@ impl Drop for SceneGpu {
         }
     }
 }
-pub(crate) fn draw_constants(instance: &DrawInstance) -> [u8; DRAW_BYTES as usize] {
+fn encode_object_parameters(instance: &DrawInstance) -> [u8; OBJECT_PARAMETERS_BYTES] {
     let mut data = [0.0; 32];
     data[..16].copy_from_slice(&instance.transform.matrix().to_cols_array());
     let inverse_scale_squared = (instance.transform.scale * instance.transform.scale).recip();
@@ -291,7 +443,7 @@ pub(crate) fn draw_constants(instance: &DrawInstance) -> [u8; DRAW_BYTES as usiz
             .extend(instance.material.occlusion_strength)
             .to_array(),
     );
-    let mut bytes = [0; DRAW_BYTES as usize];
+    let mut bytes = [0; OBJECT_PARAMETERS_BYTES];
     for (destination, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(data) {
         destination.copy_from_slice(&value.to_ne_bytes());
     }
@@ -302,6 +454,7 @@ fn floats(values: &[f32]) -> Vec<u8> {
 }
 
 struct TextureSlot {
+    index: u32,
     ctx: Arc<DeviceContext>,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
@@ -323,15 +476,27 @@ impl SceneGpu {
         data: &govno_render::TextureData,
         sampling: govno_render::TextureSampling,
     ) -> Result<(), BoxError> {
+        if self.textures.contains_key(&handle) {
+            return Err("duplicate GPU texture handle".into());
+        }
         let texture = crate::texture::Texture::with_sampling(self.memory.clone(), data, sampling)?;
         let frames = self.cameras.len() as u32;
         let mut slot = TextureSlot {
+            index: if let Some(table) = &mut self.bindless {
+                table.allocate()?
+            } else {
+                0
+            },
             ctx: self.ctx.clone(),
             pool: vk::DescriptorPool::null(),
             sets: Vec::new(),
             _texture: texture,
             color_space: data.color_space,
         };
+        if self.bindless.is_some() {
+            self.textures.insert(handle, slot);
+            return Ok(());
+        }
         // SAFETY: new descriptor sets have no GPU users; retained cameras/textures
         // outlive the slot. Partial allocation is owned by its pool.
         unsafe {
@@ -343,9 +508,9 @@ impl SceneGpu {
             ]
             .map(|ty| {
                 vk::DescriptorPoolSize::default().ty(ty).descriptor_count(
-                    if ty == vk::DescriptorType::UNIFORM_BUFFER
-                        || ty == vk::DescriptorType::STORAGE_BUFFER
-                    {
+                    if ty == vk::DescriptorType::STORAGE_BUFFER {
+                        frames * 2
+                    } else if ty == vk::DescriptorType::UNIFORM_BUFFER {
                         frames
                     } else if ty == vk::DescriptorType::SAMPLED_IMAGE {
                         frames * 5
@@ -366,7 +531,10 @@ impl SceneGpu {
                     .descriptor_pool(slot.pool)
                     .set_layouts(&layouts),
             )?;
-            for (set, camera) in slot.sets.iter().zip(&self.cameras) {
+            for (frame, (set, camera)) in slot.sets.iter().zip(&self.cameras).enumerate() {
+                let objects = [vk::DescriptorBufferInfo::default()
+                    .buffer(self.objects[frame].handle)
+                    .range(self.object_capacities[frame] as u64 * OBJECT_BYTES)];
                 let buffer = [vk::DescriptorBufferInfo::default()
                     .buffer(camera.handle)
                     .range(CAMERA_BYTES)];
@@ -376,6 +544,11 @@ impl SceneGpu {
                 let sampler = [vk::DescriptorImageInfo::default().sampler(slot._texture.sampler)];
                 self.ctx.device.update_descriptor_sets(
                     &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(10)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&objects),
                         vk::WriteDescriptorSet::default()
                             .dst_set(*set)
                             .dst_binding(0)
@@ -396,7 +569,7 @@ impl SceneGpu {
                 );
             }
         }
-        self.shadow.bind_images(&slot.sets);
+        self.shadow().bind_images(&slot.sets);
         self.specular.bind(&slot.sets);
         self.textures.insert(handle, slot);
         Ok(())
@@ -420,6 +593,10 @@ impl SceneGpu {
         frame: usize,
         material: &govno_render::Material,
     ) -> Result<[vk::DescriptorSet; 4], BoxError> {
+        self.validate_material(material)?;
+        self.material_sets(frame, material)
+    }
+    pub fn validate_material(&self, material: &govno_render::Material) -> Result<(), BoxError> {
         for (handle, space) in [
             (
                 material.emissive_texture,
@@ -453,6 +630,13 @@ impl SceneGpu {
                 return Err("texture color space does not match material slot".into());
             }
         }
+        Ok(())
+    }
+    fn material_sets(
+        &self,
+        frame: usize,
+        material: &govno_render::Material,
+    ) -> Result<[vk::DescriptorSet; 4], BoxError> {
         Ok([
             self.descriptor(frame, material.base_color_texture)?,
             self.descriptor(
@@ -486,6 +670,18 @@ impl SceneGpu {
         }
         self.extras.clear();
         self.retired_extras.collect(u64::MAX);
+        if let Some(table) = &mut self.bindless {
+            let index = self
+                .textures
+                .get(&handle)
+                .ok_or("unknown or removed texture handle")?
+                .index;
+            table.replace_all(
+                index,
+                self.texture.as_ref().ok_or("missing default texture")?,
+            );
+            table.release(index);
+        }
         self.textures
             .remove(&handle)
             .ok_or("unknown or removed texture handle")?;
@@ -512,6 +708,9 @@ impl SceneGpu {
         self.retired_extras.collect(completed);
     }
     pub fn prepare(&mut self, world: &RenderWorld, submitted: u64) -> Result<(), BoxError> {
+        if self.bindless.is_some() {
+            return Ok(());
+        }
         for entry in self.extras.values_mut() {
             entry.used = false;
         }
@@ -562,7 +761,7 @@ impl SceneGpu {
                 let sizes = [
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(frames),
+                        .descriptor_count(frames * 2),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::UNIFORM_BUFFER)
                         .descriptor_count(frames),

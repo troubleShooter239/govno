@@ -3,7 +3,12 @@ name = "govno-render-vulkan"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 [dependencies]
+govno-render-graph.workspace = true
 egui.workspace = true
 egui-ash-renderer.workspace = true
 gpu-allocator.workspace = true

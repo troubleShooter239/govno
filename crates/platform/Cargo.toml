@@ -3,6 +3,10 @@ name = "govno-platform"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 [dependencies]
 govno-input.workspace = true
 govno-core.workspace = true

@@ -17,7 +17,9 @@ fn document(entry: &str) -> Result<&'static str, BoxError> {
         "bloomBlur",
         "prefilterIBL",
         "integrateBRDF",
-        "projectSH"
+        "projectSH",
+        "vertexMainBindless",
+        "fragmentMainBindless"
     )
 }
 fn number(v: &Value, key: &str) -> Result<u32, BoxError> {
@@ -38,7 +40,10 @@ fn uniform_size(v: &Value) -> Result<u32, BoxError> {
     number(value, "value")
 }
 fn descriptor(v: &Value) -> Result<vk::DescriptorType, BoxError> {
-    let t = &v["type"];
+    let mut t = &v["type"];
+    while t["kind"] == "array" {
+        t = &t["elementType"];
+    }
     Ok(match t["kind"].as_str() {
         Some("constantBuffer") => vk::DescriptorType::UNIFORM_BUFFER,
         Some("samplerState") => vk::DescriptorType::SAMPLER,
@@ -141,7 +146,10 @@ pub(crate) fn compute(
     Ok(r.bindings.into_iter().map(|(_, b, t)| (b, t)).collect())
 }
 fn fields(parameter: &Value, expected: &[(&str, u32)]) -> Result<(), BoxError> {
-    let fields = parameter["type"]["elementType"]["fields"]
+    type_fields(&parameter["type"]["elementType"], expected)
+}
+fn type_fields(ty: &Value, expected: &[(&str, u32)]) -> Result<(), BoxError> {
+    let fields = ty["fields"]
         .as_array()
         .ok_or("missing reflected constant fields")?;
     for &(name, offset) in expected {
@@ -155,8 +163,16 @@ fn fields(parameter: &Value, expected: &[(&str, u32)]) -> Result<(), BoxError> {
     }
     Ok(())
 }
-pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
-    let r = reflect(code, entry)?;
+pub(crate) fn graphics(code: &[u8], entry: &CStr, bindless: bool) -> Result<(), BoxError> {
+    let r = if bindless {
+        parse(
+            code,
+            entry.to_str()?,
+            document(&format!("{}Bindless", entry.to_str()?))?,
+        )?
+    } else {
+        reflect(code, entry)?
+    };
     let entry = entry.to_str()?;
     let post = entry.starts_with("post");
     let shadow = entry == "shadowVertex";
@@ -165,7 +181,7 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
     } else if shadow {
         64
     } else {
-        crate::scene_gpu::DRAW_BYTES
+        0
     };
     if r.push_bytes != push {
         return Err(format!("push constant reflection mismatch: {entry}").into());
@@ -180,15 +196,26 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
                 2 => vk::DescriptorType::STORAGE_BUFFER,
                 _ => return Err("post binding mismatch".into()),
             }
+        } else if shadow {
+            if set != 0 || binding != 10 {
+                return Err("shadow descriptor interface mismatch".into());
+            }
+            vk::DescriptorType::STORAGE_BUFFER
+        } else if bindless && set == 1 {
+            match binding {
+                0 => vk::DescriptorType::SAMPLED_IMAGE,
+                1 => vk::DescriptorType::SAMPLER,
+                _ => return Err("bindless binding mismatch".into()),
+            }
         } else {
-            if set >= 4 || shadow {
+            if set >= 4 || shadow || (bindless && set != 0) {
                 return Err("graphics descriptor set mismatch".into());
             }
             match binding {
                 0 => vk::DescriptorType::UNIFORM_BUFFER,
                 1 | 3 | 5 | 6 | 8 => vk::DescriptorType::SAMPLED_IMAGE,
                 2 | 4 | 7 => vk::DescriptorType::SAMPLER,
-                9 => vk::DescriptorType::STORAGE_BUFFER,
+                9 | 10 => vk::DescriptorType::STORAGE_BUFFER,
                 _ => return Err("graphics binding mismatch".into()),
             }
         };
@@ -200,6 +227,24 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
         .as_array()
         .ok_or("missing shader parameters")?
     {
+        if parameter["name"] == "objects" {
+            let ty = &parameter["type"]["resultType"];
+            if uniform_size(ty)? as u64 != crate::scene_gpu::OBJECT_BYTES {
+                return Err("GPU Scene object stride mismatch".into());
+            }
+            type_fields(
+                ty,
+                &[
+                    ("model", 0),
+                    ("inverseScaleSquaredRoughness", 64),
+                    ("baseColorMetallic", 80),
+                    ("normalParams", 96),
+                    ("emissiveOcclusion", 112),
+                    ("textures0", 128),
+                    ("textures1", 144),
+                ],
+            )?;
+        }
         if parameter["name"] == "draw" {
             fields(
                 parameter,
@@ -215,6 +260,9 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
         if parameter["name"] == "settings" {
             fields(parameter, &[("manualSRGB", 0), ("bloomIntensity", 4)])?;
         }
+        if parameter["name"] == "shadow" {
+            fields(parameter, &[("worldToLight", 0)])?;
+        }
         if parameter["binding"]["kind"] == "descriptorTableSlot" {
             let name = parameter["name"]
                 .as_str()
@@ -222,6 +270,9 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr) -> Result<(), BoxError> {
             let expected = match name {
                 "frame" => (0, 0),
                 "environmentSH" => (0, 9),
+                "objects" => (0, 10),
+                "textureTable" => (1, 0),
+                "samplerTable" => (1, 1),
                 "specularAtlas" => (0, 6),
                 "environmentSampler" => (0, 7),
                 "brdfLut" => (0, 8),

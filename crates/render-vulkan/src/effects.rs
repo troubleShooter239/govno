@@ -2,18 +2,23 @@ use crate::{
     compute::Compute,
     context::DeviceContext,
     memory::{Buffer, ImageResource, Memory},
-    swapchain::color_range,
-    sync,
 };
 use ash::vk;
 use govno_core::BoxError;
 use govno_render::PostProcessSettings;
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EffectPass {
+    Exposure,
+    Extract,
+    Horizontal,
+    Vertical,
+}
 pub(crate) struct Effects {
     ctx: Arc<DeviceContext>,
     pub bloom: Vec<ImageResource>,
-    scratch: Vec<ImageResource>,
+    pub scratch: Vec<ImageResource>,
     pub exposure: Buffer,
     meter: Compute,
     extract: Compute,
@@ -25,6 +30,7 @@ impl Effects {
         memory: Rc<Memory>,
         extent: vk::Extent2D,
         hdr: &[ImageResource],
+        images: &mut crate::transient::ImagePool,
     ) -> Result<Self, BoxError> {
         let ctx = memory.ctx.clone();
         // SAFETY: physical device is retained by ctx.
@@ -92,17 +98,8 @@ impl Effects {
                 .collect::<Vec<_>>(),
         )?;
         for _ in 0..2 {
-            let create = || {
-                ImageResource::with_usage(
-                    memory.clone(),
-                    size,
-                    vk::Format::R16G16B16A16_SFLOAT,
-                    vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-                    color_range(),
-                )
-            };
-            owner.bloom.push(create()?);
-            owner.scratch.push(create()?);
+            owner.bloom.push(images.bloom(size)?);
+            owner.scratch.push(images.bloom(size)?);
         }
         for (i, source) in hdr.iter().enumerate() {
             owner.bind(
@@ -172,10 +169,16 @@ impl Effects {
             );
         }
     }
-    pub fn record(&self, cmd: vk::CommandBuffer, frame: usize, settings: PostProcessSettings) {
-        use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
+    /// Dispatch only; all resource dependencies and layouts belong to the render graph.
+    pub fn record(
+        &self,
+        pass: EffectPass,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        settings: PostProcessSettings,
+    ) {
         let a = settings.auto_exposure.unwrap_or_default();
-        let mut params = [
+        let params = [
             settings.exposure_multiplier(),
             a.key,
             a.min_ev.exp2(),
@@ -191,76 +194,26 @@ impl Effects {
             settings.delta_seconds,
             a.speed,
             0.0,
-            0.0,
+            if matches!(pass, EffectPass::Vertical) {
+                1.0
+            } else {
+                0.0
+            },
         ];
-        let bytes = |p: &[f32]| p.iter().flat_map(|v| v.to_ne_bytes()).collect::<Vec<_>>();
-        sync::memory(
-            &self.ctx,
-            cmd,
-            (
-                S::COMPUTE_SHADER | S::FRAGMENT_SHADER,
-                A::SHADER_READ | A::SHADER_WRITE,
-            ),
-            (S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE),
-        );
-        self.meter.dispatch(cmd, frame, &bytes(&params), [1, 1, 1]);
-        sync::memory(
-            &self.ctx,
-            cmd,
-            (S::COMPUTE_SHADER, A::SHADER_WRITE),
-            (S::COMPUTE_SHADER | S::FRAGMENT_SHADER, A::SHADER_READ),
-        );
-        for image in [&self.bloom[frame], &self.scratch[frame]] {
-            sync::transition(
-                &self.ctx,
-                cmd,
-                image.image,
-                color_range(),
-                (
-                    S::COMPUTE_SHADER | S::FRAGMENT_SHADER,
-                    A::SHADER_READ | A::SHADER_WRITE,
-                    L::UNDEFINED,
-                ),
-                (
-                    S::COMPUTE_SHADER,
-                    A::SHADER_READ | A::SHADER_WRITE,
-                    L::GENERAL,
-                ),
-            );
+        let mut bytes = [0_u8; 48];
+        for (out, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(params) {
+            *out = value.to_ne_bytes();
         }
         let groups = [
             self.extent.width.div_ceil(8),
             self.extent.height.div_ceil(8),
             1,
         ];
-        self.extract.dispatch(cmd, frame, &bytes(&params), groups);
-        sync::memory(
-            &self.ctx,
-            cmd,
-            (S::COMPUTE_SHADER, A::SHADER_WRITE),
-            (S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE),
-        );
-        self.blur.dispatch(cmd, frame * 2, &bytes(&params), groups);
-        sync::memory(
-            &self.ctx,
-            cmd,
-            (S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE),
-            (S::COMPUTE_SHADER, A::SHADER_READ | A::SHADER_WRITE),
-        );
-        params[11] = 1.0;
-        self.blur
-            .dispatch(cmd, frame * 2 + 1, &bytes(&params), groups);
-        sync::transition(
-            &self.ctx,
-            cmd,
-            self.bloom[frame].image,
-            color_range(),
-            (S::COMPUTE_SHADER, A::SHADER_WRITE, L::GENERAL),
-            (
-                S::FRAGMENT_SHADER,
-                A::SHADER_READ,
-                L::SHADER_READ_ONLY_OPTIMAL,
-            ),
-        );
+        match pass {
+            EffectPass::Exposure => self.meter.dispatch(cmd, frame, &bytes, [1, 1, 1]),
+            EffectPass::Extract => self.extract.dispatch(cmd, frame, &bytes, groups),
+            EffectPass::Horizontal => self.blur.dispatch(cmd, frame * 2, &bytes, groups),
+            EffectPass::Vertical => self.blur.dispatch(cmd, frame * 2 + 1, &bytes, groups),
+        }
     }
 }

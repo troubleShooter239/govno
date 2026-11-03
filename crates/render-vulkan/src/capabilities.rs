@@ -19,6 +19,9 @@ pub struct DeviceCapabilities {
     pub ray_tracing: bool,
     pub timeline_semaphore: bool,
     pub descriptor_indexing: bool,
+    pub bindless_capacity: u32,
+    pub legacy_materials: bool,
+    pub max_storage_buffer_range: u32,
     pub buffer_device_address: bool,
     pub max_push_constants: u32,
     pub max_image_dimension: u32,
@@ -105,7 +108,7 @@ pub(crate) fn probe(
             && l.max_per_stage_descriptor_storage_buffers >= 4
             && l.max_per_stage_descriptor_sampled_images >= 20
             && l.max_per_stage_descriptor_samplers >= 12;
-        let modern = properties.api_version >= vk::API_VERSION_1_3
+        let modern = properties.api_version >= vk::make_api_version(0, 1, 4, 0)
             && v12.timeline_semaphore != 0
             && v13.dynamic_rendering != 0
             && v13.synchronization2 != 0
@@ -114,7 +117,23 @@ pub(crate) fn probe(
             && q.timestamp_valid_bits > 0;
         let indexing = v12.runtime_descriptor_array != 0
             && v12.descriptor_binding_partially_bound != 0
+            && v12.shader_sampled_image_array_non_uniform_indexing != 0
             && v12.descriptor_binding_sampled_image_update_after_bind != 0;
+        let capacity = 1024_u32
+            .min(l.max_per_stage_descriptor_sampled_images.saturating_sub(5))
+            .min(l.max_per_stage_descriptor_samplers.saturating_sub(3))
+            .min(l.max_descriptor_set_sampled_images.saturating_sub(5))
+            .min(l.max_descriptor_set_samplers.saturating_sub(3))
+            .min(l.max_per_stage_resources.saturating_sub(11) / 2);
+        let bindless_capacity = if v12.runtime_descriptor_array != 0
+            && v12.descriptor_binding_partially_bound != 0
+            && v12.shader_sampled_image_array_non_uniform_indexing != 0
+            && capacity >= 32
+        {
+            capacity
+        } else {
+            0
+        };
         let advanced =
             modern && indexing && v12.buffer_device_address != 0 && v12.draw_indirect_count != 0;
         let memory = instance.get_physical_device_memory_properties(physical);
@@ -139,6 +158,10 @@ pub(crate) fn probe(
                 && rt.ray_tracing_pipeline != 0,
             timeline_semaphore: v12.timeline_semaphore != 0,
             descriptor_indexing: indexing,
+            bindless_capacity,
+            legacy_materials: l.max_per_stage_descriptor_storage_buffers >= 8
+                && l.max_descriptor_set_storage_buffers >= 8,
+            max_storage_buffer_range: l.max_storage_buffer_range,
             buffer_device_address: v12.buffer_device_address != 0,
             max_push_constants: l.max_push_constants_size,
             max_image_dimension: l.max_image_dimension2_d,

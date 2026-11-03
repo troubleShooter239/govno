@@ -23,6 +23,10 @@ struct FrameData
 [[vk::binding(7, 0)]] SamplerState environmentSampler;
 [[vk::binding(8, 0)]] Texture2D<float4> brdfLut;
 [[vk::binding(5, 0)]] Texture2D<float> shadowMap;
+#ifdef GOVNO_BINDLESS
+[[vk::binding(0,1)]] Texture2D<float4> textureTable[];
+[[vk::binding(1,1)]] SamplerState samplerTable[];
+#else
 [[vk::binding(1, 0)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(2, 0)]] SamplerState baseColorSampler;
 
@@ -36,16 +40,23 @@ struct FrameData
 [[vk::binding(3, 3)]] Texture2D<float4> occlusionTexture;
 [[vk::binding(4, 3)]] SamplerState occlusionSampler;
 
-struct DrawData
-{
-    column_major float4x4 model;
-    float4 inverseScaleSquaredRoughness;
-    float4 baseColorMetallic;
-    float4 normalParams; // x scale, y enabled
-    float4 emissiveOcclusion;
-};
-[[vk::push_constant]] ConstantBuffer<DrawData> draw;
+#endif
 
+#include "gpu-scene.slang"
+
+float4 sampleMaterial(DrawData draw,uint role,float2 uv)
+{
+#ifdef GOVNO_BINDLESS
+    uint index=role<4?draw.textures0[role]:draw.textures1.x;
+    return textureTable[NonUniformResourceIndex(index)].Sample(samplerTable[NonUniformResourceIndex(index)],uv);
+#else
+    if(role==0)return baseColorTexture.Sample(baseColorSampler,uv);
+    if(role==1)return normalTexture.Sample(normalSampler,uv);
+    if(role==2)return metalRoughTexture.Sample(metalRoughSampler,uv);
+    if(role==3)return emissiveTexture.Sample(emissiveSampler,uv);
+    return occlusionTexture.Sample(occlusionSampler,uv);
+#endif
+}
 struct VertexInput
 {
     [[vk::location(0)]] float3 position : POSITION;
@@ -60,11 +71,14 @@ struct VertexOutput
     float3 worldNormal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 worldTangent : TEXCOORD3;
+    nointerpolation uint objectId : TEXCOORD4;
 };
 [shader("vertex")]
-VertexOutput vertexMain(VertexInput input)
+VertexOutput vertexMain(VertexInput input,uint objectId:SV_VulkanInstanceID)
 {
+    DrawData draw=objects[objectId];
     VertexOutput output;
+    output.objectId=objectId;
     float4 worldPosition = mul(draw.model, float4(input.position, 1.0));
     output.position = mul(frame.viewProjection, worldPosition);
     output.worldPosition = worldPosition.xyz;
@@ -150,13 +164,14 @@ float3 directLight(float3 n, float3 v, float3 l, float3 base, float metal, float
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target0
 {
+    DrawData draw=objects[input.objectId];
     float3 n = safeNormalize(input.worldNormal);
     if (draw.normalParams.y > 0.5) {
         float3 px = ddx(input.worldPosition), py = ddy(input.worldPosition);
         float2 ux = ddx(input.uv), uy = ddy(input.uv);
         float determinant = ux.x * uy.y - ux.y * uy.x;
         // Sample before fragment-varying frame validity branches for defined derivatives.
-        float3 mapped = normalTexture.Sample(normalSampler,input.uv).xyz * 2.0 - 1.0;
+        float3 mapped = sampleMaterial(draw,1,input.uv).xyz * 2.0 - 1.0;
         float3 tangent = float3(0.0);
         float3 bitangent = float3(0.0);
         bool validFrame = false;
@@ -180,8 +195,8 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     }
     float3 v = safeNormalize(frame.cameraPosition.xyz - input.worldPosition);
     float3 l = frame.lightDirection.xyz;
-    float3 base = draw.baseColorMetallic.xyz * baseColorTexture.Sample(baseColorSampler, input.uv).rgb;
-    float2 mr = metalRoughTexture.Sample(metalRoughSampler,input.uv).gb;
+    float3 base = draw.baseColorMetallic.xyz * sampleMaterial(draw,0,input.uv).rgb;
+    float2 mr = sampleMaterial(draw,2,input.uv).gb;
     float metal = saturate(draw.baseColorMetallic.w * mr.y);
     float roughness = clamp(draw.inverseScaleSquaredRoughness.w * mr.x,0.045,1.0);
     float3 color = directLight(n,v,l,base,metal,roughness,frame.lightRadiance.xyz) * directionalVisibility(input.worldPosition);
@@ -197,12 +212,12 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
         color += directLight(n,v,safeNormalize(delta),base,metal,roughness,light.intensity.rgb * attenuation);
     }
     // Diffuse-only IBL. Directional shadows affect direct light only.
-    float ao = lerp(1.0, occlusionTexture.Sample(occlusionSampler,input.uv).r, draw.emissiveOcclusion.w);
+    float ao = lerp(1.0, sampleMaterial(draw,4,input.uv).r, draw.emissiveOcclusion.w);
     float3 f0 = lerp(float3(0.04),base,metal);
     float3 ambientFresnel = f0 + (1.0-f0) * pow(1.0-saturate(dot(n,v)),5.0);
     color += specularEnvironment(n,v,roughness,f0,input.worldPosition);
     color += (1.0-ambientFresnel) * (1.0-metal) * base * diffuseEnvironment(n,input.worldPosition) * ao;
-    color += draw.emissiveOcclusion.rgb * emissiveTexture.Sample(emissiveSampler,input.uv).rgb;
+    color += draw.emissiveOcclusion.rgb * sampleMaterial(draw,3,input.uv).rgb;
 
 
     if(frame.cascadeParams.z>0.5){float depth=mul(frame.viewProjection,float4(input.worldPosition,1)).w;uint i=depth<frame.cascadeSplits.x?0:depth<frame.cascadeSplits.y?1:depth<frame.cascadeSplits.z?2:3;float3 tint[4]={float3(1,0.25,0.25),float3(0.25,1,0.25),float3(0.25,0.4,1),float3(1,1,0.25)};color*=tint[i];}

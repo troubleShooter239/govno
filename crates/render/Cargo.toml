@@ -3,6 +3,10 @@ name = "govno-render"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 [dependencies]
 glam.workspace = true
 govno-core.workspace = true

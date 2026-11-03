@@ -83,6 +83,7 @@ fn main() -> Result<(), BoxError> {
         .try_init()?;
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
+    let mut bindless = true;
     let mut gltf_path = None;
     let mut scene_path = None;
     let mut environment_path = None;
@@ -177,9 +178,10 @@ fn main() -> Result<(), BoxError> {
             "--no-specular" => specular = false,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
+            "--no-bindless" => bindless = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation]"
+                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation] [--no-bindless]"
                 );
                 return Ok(());
             }
@@ -242,6 +244,7 @@ fn main() -> Result<(), BoxError> {
                 },
                 validation,
                 callback_stats,
+                bindless,
             )?;
             if benchmark_path.is_some() {
                 renderer.start_benchmark();

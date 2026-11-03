@@ -1,6 +1,6 @@
 use crate::{
     context::DeviceContext,
-    memory::{ImageResource, Memory, depth_range},
+    memory::{ImageResource, Memory},
     mesh::GpuMesh,
     pipeline::ForwardPipeline,
 };
@@ -15,7 +15,10 @@ pub(crate) struct ShadowMap {
     ctx: Arc<DeviceContext>,
 }
 impl ShadowMap {
-    pub fn new(memory: Rc<Memory>) -> Result<Self, BoxError> {
+    pub fn new(
+        memory: Rc<Memory>,
+        scene_layout: vk::DescriptorSetLayout,
+    ) -> Result<Self, BoxError> {
         // SAFETY: physical device belongs to the retained live instance.
         let features = unsafe {
             memory
@@ -34,7 +37,7 @@ impl ShadowMap {
         }
         let mut owner = Self {
             images: vec![],
-            pipeline: ForwardPipeline::shadow(memory.ctx.clone())?,
+            pipeline: ForwardPipeline::shadow(memory.ctx.clone(), scene_layout)?,
             ctx: memory.ctx.clone(),
         };
         for _ in 0..2 {
@@ -78,6 +81,7 @@ impl ShadowMap {
         world: &RenderWorld,
         meshes: &HashMap<MeshHandle, GpuMesh>,
         viewport: govno_render::RenderExtent,
+        scene_set: vk::DescriptorSet,
     ) -> Result<u32, BoxError> {
         let mut draws = 0;
         let matrix = world
@@ -89,24 +93,6 @@ impl ShadowMap {
         // SAFETY: caller has begun command recording after the frame timeline wait.
         // Per-frame depth image and meshes remain live through submission completion.
         unsafe {
-            let barrier = [vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                .src_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                )
-                .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image.image)
-                .subresource_range(depth_range())];
-            device.cmd_pipeline_barrier2(
-                command,
-                &vk::DependencyInfo::default().image_memory_barriers(&barrier),
-            );
             let depth = vk::RenderingAttachmentInfo::default()
                 .image_view(image.view)
                 .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -138,6 +124,14 @@ impl ShadowMap {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.pipeline,
             );
+            device.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.layout,
+                0,
+                &[scene_set],
+                &[],
+            );
             for cascade in 0..4 {
                 device.cmd_set_viewport(
                     command,
@@ -166,23 +160,21 @@ impl ShadowMap {
                     }],
                 );
                 if let Some(cascades) = &matrix {
-                    let matrix = cascades.matrices[cascade];
-                    for instance in &world.instances {
+                    let matrix = cascades.matrices[cascade].to_cols_array();
+                    let mut bytes = [0; 64];
+                    for (destination, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix)
+                    {
+                        destination.copy_from_slice(&value.to_ne_bytes());
+                    }
+                    device.cmd_push_constants(
+                        command,
+                        self.pipeline.layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        &bytes,
+                    );
+                    for (object_id, instance) in world.instances.iter().enumerate() {
                         let mesh = meshes.get(&instance.mesh).ok_or("unknown shadow mesh")?;
-                        let matrix = (matrix * instance.transform.matrix()).to_cols_array();
-                        let mut bytes = [0; 64];
-                        for (destination, value) in
-                            bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix)
-                        {
-                            destination.copy_from_slice(&value.to_ne_bytes());
-                        }
-                        device.cmd_push_constants(
-                            command,
-                            self.pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            &bytes,
-                        );
                         device.cmd_bind_vertex_buffers(command, 0, &[mesh.vertices.handle], &[0]);
                         device.cmd_bind_index_buffer(
                             command,
@@ -190,30 +182,19 @@ impl ShadowMap {
                             0,
                             vk::IndexType::UINT32,
                         );
-                        device.cmd_draw_indexed(command, mesh.index_count, 1, 0, 0, 0);
+                        device.cmd_draw_indexed(
+                            command,
+                            mesh.index_count,
+                            1,
+                            0,
+                            0,
+                            object_id as u32,
+                        );
                         draws += 1;
                     }
                 }
             }
             device.cmd_end_rendering(command);
-            let ready = [vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                )
-                .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image.image)
-                .subresource_range(depth_range())];
-            device.cmd_pipeline_barrier2(
-                command,
-                &vk::DependencyInfo::default().image_memory_barriers(&ready),
-            );
         }
         Ok(draws)
     }

@@ -7,6 +7,7 @@ pub(crate) struct Measurements {
     pub submitted: u64,
     pub culled: u64,
     pub shadow: u64,
+    pub descriptor_binds: u64,
 }
 impl Measurements {
     pub fn new() -> Self {

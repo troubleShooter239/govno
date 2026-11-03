@@ -89,6 +89,7 @@ impl Drop for SurfaceContext {
     }
 }
 pub(crate) struct DeviceContext {
+    pub bindless: bool,
     surface: Arc<SurfaceContext>,
     pub device: ash::Device,
     pub swapchain: ash::khr::swapchain::Device,
@@ -178,6 +179,7 @@ pub(crate) fn create_device(
     window: Arc<dyn SurfaceTarget>,
     validation: bool,
     stats: Arc<ValidationStats>,
+    bindless_requested: bool,
 ) -> Result<Arc<DeviceContext>, BoxError> {
     // SAFETY: loader lifetime is retained by InstanceContext. All Vulkan handles
     // created below are immediately transferred to RAII owners on success.
@@ -186,10 +188,16 @@ pub(crate) fn create_device(
         let loader_version = entry
             .try_enumerate_instance_version()?
             .unwrap_or(vk::API_VERSION_1_0);
-        if loader_version < vk::API_VERSION_1_3 {
-            return Err("Vulkan 1.3 loader required".into());
+        let required_version = vk::make_api_version(0, 1, 4, 0);
+        if loader_version < required_version {
+            return Err(format!(
+                "Vulkan 1.4 loader required; found {}",
+                version_string(loader_version)
+            )
+            .into());
         }
-        let version = loader_version.min(vk::make_api_version(0, 1, 4, 0));
+        let version = required_version;
+        tracing::info!(loader=%version_string(loader_version), requested=%version_string(version), "Vulkan instance API");
         let display = window.display_handle()?.as_raw();
         let mut extensions = ash_window::enumerate_required_extensions(display)?.to_vec();
         let supported = entry.enumerate_instance_extension_properties(None)?;
@@ -286,7 +294,8 @@ pub(crate) fn create_device(
         for physical in devices {
             let properties = instance.get_physical_device_properties(physical);
             let name = CStr::from_ptr(properties.device_name.as_ptr()).to_string_lossy();
-            if properties.api_version < vk::API_VERSION_1_3 {
+            if properties.api_version < required_version {
+                tracing::warn!(gpu=%name,api=%version_string(properties.api_version),"GPU rejected: Vulkan 1.4 required");
                 continue;
             }
             let available = instance.enumerate_device_extension_properties(physical)?;
@@ -358,6 +367,11 @@ pub(crate) fn create_device(
                 tracing::warn!(%name,"GPU rejected: Modern profile requirements not met");
                 continue;
             }
+            let bindless = bindless_requested && capabilities.bindless_capacity > 0;
+            if !bindless && !capabilities.legacy_materials {
+                tracing::warn!(%name,"GPU rejected: legacy material layouts require 8 storage-buffer descriptors");
+                continue;
+            }
             let priorities = [1.0];
             let queues = [vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(family)
@@ -371,8 +385,11 @@ pub(crate) fn create_device(
             let mut enabled_maintenance =
                 vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
                     .swapchain_maintenance1(true);
-            let mut enabled_v12 =
-                vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+            let mut enabled_v12 = vk::PhysicalDeviceVulkan12Features::default()
+                .timeline_semaphore(true)
+                .runtime_descriptor_array(bindless)
+                .descriptor_binding_partially_bound(bindless)
+                .shader_sampled_image_array_non_uniform_indexing(bindless);
             let mut enabled_v13 = vk::PhysicalDeviceVulkan13Features::default()
                 .dynamic_rendering(true)
                 .synchronization2(true);
@@ -391,13 +408,14 @@ pub(crate) fn create_device(
             let queue = device.get_device_queue(family, 0);
             let swapchain = ash::khr::swapchain::Device::new(instance, &device);
             tracing::info!(gpu = %name, api_major = vk::api_version_major(properties.api_version),
-                api_minor = vk::api_version_minor(properties.api_version), present_fences, validation, "Vulkan device selected");
+                api_minor = vk::api_version_minor(properties.api_version), api=%version_string(properties.api_version), present_fences, validation, "Vulkan device selected");
             if !present_fences {
                 tracing::warn!(
                     "No swapchain maintenance1: resize/shutdown use conventional device-idle WSI fallback"
                 );
             }
             let mut owner = DeviceContext {
+                bindless,
                 surface,
                 device,
                 physical,
@@ -419,6 +437,15 @@ pub(crate) fn create_device(
             owner.cache_path = path;
             return Ok(Arc::new(owner));
         }
-        Err("no compatible GPU: need Vulkan 1.3, dynamicRendering, synchronization2, swapchain and a graphics+present queue".into())
+        Err("no compatible GPU: need Vulkan 1.4, dynamicRendering, synchronization2, swapchain and a graphics+compute+present queue".into())
     }
+}
+
+fn version_string(version: u32) -> String {
+    format!(
+        "{}.{}.{}",
+        vk::api_version_major(version),
+        vk::api_version_minor(version),
+        vk::api_version_patch(version)
+    )
 }

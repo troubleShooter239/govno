@@ -1161,6 +1161,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "govno-render-graph"
+version = "0.1.0"
+
+[[package]]
 name = "govno-render-vulkan"
 version = "0.1.0"
 dependencies = [
@@ -1171,6 +1175,7 @@ dependencies = [
  "glam 0.34.2",
  "govno-core",
  "govno-render",
+ "govno-render-graph",
  "gpu-allocator",
  "raw-window-handle",
  "serde_json",
