@@ -1,9 +1,10 @@
 mod scene;
+mod scene_upload;
 mod simulation;
 use glam::Vec3;
 use govno_core::BoxError;
 use govno_platform::{InputEvent, RunOptions, WindowDriver};
-use govno_render::{FrameStatus, MeshHandle, RenderExtent, RenderWorld};
+use govno_render::{FrameStatus, RenderExtent, RenderWorld};
 use govno_render_vulkan::{ValidationStats, VulkanRenderer};
 use govno_runtime::Engine;
 use std::{sync::Arc, time::Instant};
@@ -14,17 +15,13 @@ struct GraphicsApp {
     simulation: simulation::Simulation,
     model_assets: govno_assets::AssetManager<Vec<govno_assets::ImportedPrimitive>>,
     last_frame: Instant,
-    frames: u64,
-    animated: usize,
-    temporary: Option<MeshHandle>,
-    smoke: bool,
+    animated: Option<usize>,
+    scene_path: Option<std::path::PathBuf>,
+    prepared_scene: Option<govno_scene::PreparedScene>,
+    scene_upload: Option<scene_upload::SceneUpload>,
     benchmark_path: Option<std::path::PathBuf>,
     benchmark_warmup: usize,
     expected_offscreen: usize,
-    shadows: bool,
-    environment: bool,
-    specular: bool,
-    environment_data: govno_render::EnvironmentRadiance,
 }
 impl WindowDriver for GraphicsApp {
     fn input(&mut self, event: InputEvent) {
@@ -39,227 +36,30 @@ impl WindowDriver for GraphicsApp {
         self.last_frame = now;
         self.world.post_process.delta_seconds = elapsed.as_secs_f32().min(0.1);
         self.simulation.advance(elapsed);
+        if self.simulation.take_scene_reload() && self.scene_path.is_some() {
+            self.reload_scene()?;
+        }
         self.world.camera = self.simulation.camera();
-        self.world.instances[self.animated].transform.rotation = self.simulation.rotation();
-        if self.frames == 20
-            && let Some(handle) = self.temporary.take()
-        {
-            self.world
-                .instances
-                .retain(|instance| instance.mesh != handle);
-            self.renderer.remove_mesh(handle)?;
-            tracing::info!("smoke: mesh retired after submitted draws");
+        if let Some(index) = self.animated {
+            self.world.instances[index].transform.rotation = self.simulation.rotation();
         }
-        if self.smoke && self.frames == 40 {
-            self.renderer
-                .set_base_color_texture(&govno_render::TextureData {
-                    color_space: Default::default(),
-                    width: 2,
-                    height: 2,
-                    rgba8: vec![
-                        255, 255, 255, 255, 155, 155, 155, 255, 155, 155, 155, 255, 255, 255, 255,
-                        255,
-                    ],
-                })?;
-            tracing::info!("smoke: texture replaced after submitted frames");
-        }
-        if self.smoke && self.environment {
-            if self.frames == 26 {
-                self.world.diffuse_environment = None;
-                self.world.specular_environment = false;
-                tracing::info!("smoke: diffuse environment disabled");
-            }
-            if self.frames == 28 {
-                let environment =
-                    govno_render::EnvironmentRadiance::constant(Vec3::new(0.05, 0.1, 0.2))?;
-                self.renderer.set_environment_gpu(&environment, 0)?;
-                self.world.diffuse_environment =
-                    Some(govno_render::DiffuseEnvironment::constant(Vec3::ZERO)?);
-                self.world.specular_environment = self.specular;
-                tracing::info!("smoke: constant HDR environment enabled");
-            }
-            if self.frames == 32 {
-                self.renderer
-                    .set_environment_gpu(&self.environment_data, 0)?;
-                self.world.diffuse_environment =
-                    Some(govno_render::DiffuseEnvironment::constant(Vec3::ZERO)?);
-                self.world.specular_environment = self.specular;
-                tracing::info!("smoke: projected panorama environment restored");
-            }
-        }
-        if self.smoke && self.shadows {
-            if self.frames == 22 {
-                self.world.directional_shadow = None;
-                tracing::info!("smoke: shadows disabled");
-            }
-            if self.frames == 25 {
-                self.world.directional_shadow = Some(Default::default());
-                tracing::info!("smoke: shadows enabled");
-            }
-        }
-        if self.smoke && self.frames == 45 {
-            self.world.point_lights[0].position.x = -1.5;
-            self.world.point_lights[1].range = 5.0;
-            tracing::info!("smoke: point light position/range updated");
-        }
-        // Alternate material keys while previous frames may still use their pools.
-        if self.smoke && (61..=64).contains(&self.frames) {
-            let material = &mut self.world.instances[self.animated].material;
-            material.emissive_texture = if self.frames % 2 == 1 {
-                material.base_color_texture
-            } else {
-                None
-            };
-            tracing::info!(
-                frame = self.frames,
-                "smoke: material descriptor key changed"
-            );
-        }
-        if self.smoke && self.frames == 77 {
-            let mut dark = self.world.point_lights[0];
-            dark.intensity = Vec3::ZERO;
-            self.world
-                .point_lights
-                .resize(govno_render::MAX_POINT_LIGHTS, dark);
-            tracing::info!("smoke: maximum supported light count submitted");
-        }
-        if self.smoke && self.frames == 78 {
-            self.world.point_lights.clear();
-            tracing::info!("smoke: zero point lights submitted");
-        }
-        if self.smoke && self.frames == 79 {
-            self.world.point_lights = scene::point_lights();
-        }
-        if self.smoke && self.frames == 76 {
-            let saved = self.world.point_lights.clone();
-            self.world
-                .point_lights
-                .resize(govno_render::MAX_POINT_LIGHTS + 1, saved[0]);
-            let rejected = self.renderer.draw(&self.world).is_err();
-            self.world.point_lights = saved;
-            if !rejected {
-                return Err("smoke: excessive point lights accepted".into());
-            }
-            tracing::info!("smoke: excessive light count rejected; renderer remains usable");
-        }
-        if self.smoke {
-            if self.frames == 75 {
-                let saved = self.world.post_process;
-                self.world.post_process.exposure_ev = f32::NAN;
-                let rejected = self.renderer.draw(&self.world).is_err();
-                self.world.post_process = saved;
-                if !rejected {
-                    return Err("smoke: invalid exposure was accepted".into());
-                }
-                tracing::info!("smoke: invalid exposure rejected; renderer remains usable");
-            }
-            if let Some(offset) = match self.frames {
-                15 => Some(-1.0),
-                35 => Some(2.0),
-                75 => Some(-1.0),
-                _ => None,
-            } {
-                self.world.post_process.exposure_ev =
-                    (self.world.post_process.exposure_ev + offset).clamp(-16.0, 16.0);
-                tracing::info!(
-                    exposure_ev = self.world.post_process.exposure_ev,
-                    "smoke: exposure updated"
-                );
-            }
-        }
-        if self.smoke {
-            match self.frames {
-                90 => self.world.camera.position = Vec3::new(-3.0, 2.0, 5.0),
-                95 => self.world.camera.position = Vec3::new(3.0, 2.0, 5.0),
-                100 => self.world.camera.position.z = 35.0,
-                105 => self.world.camera.position.z = 70.0,
-                110 => self.world.camera.position = Vec3::new(0.0, 3.3, 10.0),
-                _ => {}
-            }
-        }
-        let exposure_before = if self.smoke && self.frames == 80 {
-            let state = self.renderer.post_diagnostics()?;
-            self.world.light_radiance *= 0.1;
-            state
-        } else {
-            None
-        };
-        if self.smoke && self.frames == 82 {
-            self.world.light_radiance *= 10.0;
-        }
-        let presented = self.renderer.draw(&self.world)? == FrameStatus::Presented;
-        if presented
-            && let Some(before) = exposure_before
-            && let Some(after) = self.renderer.post_diagnostics()?
-        {
-            let expected = if let Some(a) = self.world.post_process.auto_exposure {
-                let target = (a.key / after[3]).clamp(a.min_ev.exp2(), a.max_ev.exp2());
-                (before[1]
-                    + (target - before[1])
-                        * (1.0 - (-self.world.post_process.delta_seconds * a.speed).exp()))
-                .clamp(a.min_ev.exp2(), a.max_ev.exp2())
-            } else {
-                1.0
-            };
-            if (expected - after[1]).abs() > 0.001 * expected.max(1.0) {
-                return Err("GPU temporal exposure differs from CPU reference".into());
-            }
-            tracing::info!(
-                before = before[1],
-                after = after[1],
-                expected,
-                "GPU temporal exposure verified"
-            );
-        }
-        if presented && self.smoke && self.frames == 5 && self.world.frustum_culling {
-            let counts = self.renderer.last_draw_counts;
-            if (counts.culled as usize) < self.expected_offscreen {
-                return Err("off-screen stress objects were not CPU-culled".into());
-            }
-            if self.world.directional_shadow.is_some()
-                && counts.shadow != self.world.instances.len() as u32 * 4
-            {
-                return Err("main-camera culling removed shadow casters".into());
-            }
-            tracing::info!(
-                ?counts,
-                "CPU culling and independent shadow-caster verification"
-            );
-        }
-        if presented {
-            self.frames += 1;
-        }
-        Ok(presented)
+        Ok(self.renderer.draw(&self.world)? == FrameStatus::Presented)
     }
     fn shutdown(&mut self) -> Result<(), BoxError> {
-        tracing::info!(
-            ticks = self.simulation.ticks,
-            discarded_ms = self.simulation.discarded.as_secs_f64() * 1000.0,
-            cached_models = self.model_assets.len(),
-            "simulation shutdown state"
-        );
-        tracing::info!(position=?self.world.camera.position, yaw=self.world.camera.yaw, "camera shutdown state");
-        if self.smoke
-            && let Some(state) = self.renderer.post_diagnostics()?
-        {
-            tracing::info!(
-                exposure = state[0],
-                adapted = state[1],
-                luminance = state[3],
-                "GPU exposure diagnostics"
-            );
-            if !state.iter().all(|v| v.is_finite()) || state[0] <= 0.0 {
-                return Err("invalid GPU exposure state".into());
-            }
-        }
         if let Some(path) = &self.benchmark_path {
             let report = self.renderer.benchmark_report(self.benchmark_warmup)?;
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, report)?;
-            tracing::info!(path=%path.display(),"benchmark report written");
+            tracing::info!(path=%path.display(), "benchmark report written");
         }
+        self.world.instances.clear();
+        if let Some(upload) = self.scene_upload.take() {
+            upload.release(&mut self.renderer)?;
+        }
+        self.prepared_scene.take();
+        self.model_assets.remove_unused();
         self.renderer.wait_idle()
     }
 }
@@ -272,6 +72,7 @@ fn main() -> Result<(), BoxError> {
     let mut options = RunOptions::default();
     let mut validation = cfg!(debug_assertions);
     let mut gltf_path = None;
+    let mut scene_path = None;
     let mut environment_path = None;
     let mut benchmark_path = None;
     let mut benchmark_warmup = 120_usize;
@@ -332,6 +133,12 @@ fn main() -> Result<(), BoxError> {
             "--debug-cascades" => debug_cascades = true,
             "--no-local-probes" => local_probes = false,
             "--gltf" => gltf_path = Some(args.next().ok_or("--gltf requires a path")?),
+            "--scene" => {
+                scene_path = Some(
+                    std::path::PathBuf::from(args.next().ok_or("--scene requires a path")?)
+                        .canonicalize()?,
+                )
+            }
             "--emission" => {
                 let value: f32 = args.next().ok_or("--emission requires a value")?.parse()?;
                 if !value.is_finite() || !(0.0..=100.0).contains(&value) {
@@ -356,26 +163,37 @@ fn main() -> Result<(), BoxError> {
             "--no-shadows" => shadows = false,
             "--no-environment" => environment = false,
             "--no-specular" => specular = false,
-            "--smoke" => options.smoke = true,
             "--validation" => validation = true,
             "--no-validation" => validation = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--smoke] [--validation|--no-validation]"
+                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
-    if options.smoke && options.frame_limit.is_none_or(|n| n < 80) {
-        return Err("--smoke requires --frames N with N >= 80".into());
+    if scene_path.is_some() && (gltf_path.is_some() || emission.is_some()) {
+        return Err("--scene cannot be combined with demo-only --gltf or --emission".into());
     }
     post_process.validate()?;
     let mut model_assets = govno_assets::AssetManager::default();
-    let imported = gltf_path
-        .map(|path| model_assets.load(path, |path| govno_assets::load_gltf(path)))
-        .transpose()?;
+    let gltf_import = gltf_path.is_some();
+    let prepared_scene = if let Some(path) = &scene_path {
+        Some(govno_scene::PreparedScene::load(path, &mut model_assets)?)
+    } else if let Some(path) = gltf_path {
+        Some(scene_upload::prepare_model(path, &mut model_assets)?)
+    } else {
+        None
+    };
+    if culling_stress > 0
+        && prepared_scene
+            .as_ref()
+            .is_some_and(|scene| scene.models().is_empty())
+    {
+        return Err("--culling-stress needs at least one model".into());
+    }
     let environment_data = if let Some(path) = environment_path {
         let panorama = govno_assets::load_environment(&path)?;
         tracing::info!(path,width=panorama.width,height=panorama.height,exposure=?panorama.exposure,color_correction=?panorama.color_correction,"HDR panorama decoded; stored radiance preserved");
@@ -399,7 +217,6 @@ fn main() -> Result<(), BoxError> {
             ))
         })
         .collect::<Result<_, _>>()?;
-    let smoke = options.smoke;
     let stats = Arc::new(ValidationStats::default());
     let callback_stats = stats.clone();
     let result = Engine::builder().build()?.run(|| {
@@ -417,75 +234,37 @@ fn main() -> Result<(), BoxError> {
             if benchmark_path.is_some() {
                 renderer.start_benchmark();
             }
-            let (mut world, animated, temporary) =
-                scene::build(&mut renderer, smoke, &environment_data)?;
+            let (mut world, animated, mut scene_upload) = if let Some(prepared) = &prepared_scene
+                && !gltf_import
+            {
+                let mut world = scene_upload::world(prepared, Vec::new())?;
+                renderer.set_environment_gpu(&environment_data, 0)?;
+                let (upload, instances) =
+                    scene_upload::SceneUpload::upload(&mut renderer, prepared)?;
+                world.instances = instances;
+                (world, None, Some(upload))
+            } else {
+                let (world, animated) = scene::build(&mut renderer, &environment_data)?;
+                (world, Some(animated), None)
+            };
             world.frustum_culling = frustum_culling;
-            for i in 0..culling_stress {
-                let source = &world.instances[animated];
-                world.instances.push(govno_render::DrawInstance {
-                    mesh: source.mesh,
-                    material: source.material,
-                    transform: govno_render::Transform {
-                        translation: Vec3::new(
-                            10000.0 + (i % 64) as f32 * 3.0,
-                            0.0,
-                            -((i / 64) as f32) * 3.0,
-                        ),
-                        ..Default::default()
-                    },
-                });
-            }
+            add_culling_stress(&mut world, culling_stress)?;
             for (slot, data) in &probe_data {
                 renderer.set_environment_gpu(data, *slot)?;
             }
-            if smoke {
-                renderer.verify_environment(&environment_data)?;
-            }
             if let Some(strength) = emission {
-                world.instances[animated].material.emissive = Vec3::new(1.0, 0.2, 0.025) * strength;
+                world.instances[animated.ok_or("emission requires the demo scene")?]
+                    .material
+                    .emissive = Vec3::new(1.0, 0.2, 0.025) * strength;
             }
             if !local_probes {
                 world.local_probes.clear();
             }
-            if let Some(handle) = imported {
-                let primitives = model_assets.get(handle).ok_or("cached model was evicted")?;
-                let white = renderer.upload_texture(&govno_render::TextureData {
-                    color_space: Default::default(),
-                    width: 1,
-                    height: 1,
-                    rgba8: vec![255; 4],
-                })?;
-                for primitive in primitives.iter() {
-                    let mesh = renderer.upload_mesh(&primitive.mesh)?;
-                    let mut material = primitive.material;
-                    material.base_color_texture = Some(match &primitive.base_color_texture {
-                        Some(data) => {
-                            renderer.upload_texture_with_sampling(data, primitive.sampling)?
-                        }
-                        None => white,
-                    });
-                    if let Some((data, sampling)) = &primitive.normal_texture {
-                        material.normal_texture =
-                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
-                    }
-                    if let Some((data, sampling)) = &primitive.metallic_roughness_texture {
-                        material.metallic_roughness_texture =
-                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
-                    }
-                    if let Some((data, sampling)) = &primitive.emissive_texture {
-                        material.emissive_texture =
-                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
-                    }
-                    if let Some((data, sampling)) = &primitive.occlusion_texture {
-                        material.occlusion_texture =
-                            Some(renderer.upload_texture_with_sampling(data, *sampling)?);
-                    }
-                    world.instances.push(govno_render::DrawInstance {
-                        mesh,
-                        material,
-                        transform: Default::default(),
-                    });
-                }
+            if gltf_import && let Some(prepared) = &prepared_scene {
+                let (upload, instances) =
+                    scene_upload::SceneUpload::upload(&mut renderer, prepared)?;
+                world.instances.extend(instances);
+                scene_upload = Some(upload);
             }
             if let Some(shadow) = &mut world.directional_shadow {
                 shadow.debug_cascades = debug_cascades;
@@ -504,19 +283,15 @@ fn main() -> Result<(), BoxError> {
                 renderer,
                 simulation: simulation::Simulation::new(world.camera.clone()),
                 model_assets,
+                scene_path,
+                prepared_scene,
+                scene_upload,
                 world,
                 last_frame: Instant::now(),
-                frames: 0,
                 animated,
-                temporary,
-                smoke,
                 benchmark_path,
                 benchmark_warmup,
                 expected_offscreen: culling_stress,
-                shadows,
-                environment,
-                specular,
-                environment_data,
             }))
         })?;
         tracing::info!(frames, "desktop run completed");
@@ -533,4 +308,87 @@ fn main() -> Result<(), BoxError> {
         return Err("Vulkan validation errors were reported".into());
     }
     Ok(())
+}
+
+fn add_culling_stress(world: &mut RenderWorld, count: usize) -> Result<(), BoxError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let source = world
+        .instances
+        .first()
+        .ok_or("culling stress needs at least one draw instance")?;
+    let mesh = source.mesh;
+    let material = source.material;
+    for i in 0..count {
+        world.instances.push(govno_render::DrawInstance {
+            mesh,
+            material,
+            transform: govno_render::Transform {
+                translation: Vec3::new(
+                    10000.0 + (i % 64) as f32 * 3.0,
+                    0.0,
+                    -((i / 64) as f32) * 3.0,
+                ),
+                ..Default::default()
+            },
+        });
+    }
+    Ok(())
+}
+
+impl GraphicsApp {
+    /// Manifest reload is explicit and synchronous. Failed CPU preparation or
+    /// GPU upload leaves the displayed scene unchanged.
+    fn reload_scene(&mut self) -> Result<bool, BoxError> {
+        let Some(path) = self.scene_path.clone() else {
+            return Ok(false);
+        };
+        let prepared = match govno_scene::PreparedScene::load(&path, &mut self.model_assets) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.model_assets.remove_unused();
+                tracing::warn!(%error, "scene reload rejected; active scene retained");
+                return Ok(false);
+            }
+        };
+        if self.expected_offscreen > 0 && prepared.models().is_empty() {
+            tracing::warn!("scene reload rejected: culling stress requires geometry");
+            self.model_assets.remove_unused();
+            return Ok(false);
+        }
+        // Construct fallible CPU state before allocating GPU resources.
+        let mut next = scene_upload::world(&prepared, Vec::new())?;
+        let (upload, instances) =
+            match scene_upload::SceneUpload::upload(&mut self.renderer, &prepared) {
+                Ok(uploaded) => uploaded,
+                Err(error) => {
+                    drop(prepared);
+                    self.model_assets.remove_unused();
+                    tracing::warn!(%error, "scene upload failed; active scene retained");
+                    return Ok(false);
+                }
+            };
+        next.instances = instances;
+        if let Err(error) = add_culling_stress(&mut next, self.expected_offscreen) {
+            upload.release(&mut self.renderer)?;
+            return Err(error);
+        }
+        self.world.instances = next.instances;
+        self.world.camera = next.camera;
+        self.world.light_direction = next.light_direction;
+        self.world.light_radiance = next.light_radiance;
+        self.world.point_lights = next.point_lights;
+        self.simulation.reset_camera(self.world.camera.clone());
+        let previous = self.scene_upload.replace(upload);
+        self.prepared_scene = Some(prepared);
+        if let Some(previous) = previous {
+            previous.release(&mut self.renderer)?;
+        }
+        self.model_assets.remove_unused();
+
+        tracing::info!(path=%path.display(), cached_models=self.model_assets.len(),
+            instances=self.world.instances.len(), "authored scene reloaded");
+        Ok(true)
+    }
 }

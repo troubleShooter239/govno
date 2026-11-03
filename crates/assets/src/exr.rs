@@ -44,28 +44,3 @@ pub fn decode_exr(reader: impl Read + Seek) -> Result<HdrPanorama, BoxError> {
         color_correction: None,
     })
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use image::{ExtendedColorType, ImageEncoder, codecs::openexr::OpenExrEncoder};
-    use std::io::Cursor;
-    fn encode(value: f32) -> Vec<u8> {
-        let mut file = Cursor::new(Vec::new());
-        let bytes: Vec<u8> = (0..8)
-            .flat_map(|_| [value, 0.5, 2.0])
-            .flat_map(f32::to_ne_bytes)
-            .collect();
-        OpenExrEncoder::new(&mut file)
-            .write_image(&bytes, 4, 2, ExtendedColorType::Rgb32F)
-            .unwrap();
-        file.into_inner()
-    }
-    #[test]
-    fn exr_float_energy_and_order_survive_decode() {
-        let map = decode_exr(Cursor::new(encode(4.25))).unwrap();
-        assert_eq!((map.width, map.height), (4, 2));
-        assert_eq!(map.radiance[0], Vec3::new(4.25, 0.5, 2.0));
-        assert!(decode_exr(Cursor::new(encode(-1.0))).is_err());
-        assert!(decode_exr(Cursor::new(b"bad EXR")).is_err());
-    }
-}

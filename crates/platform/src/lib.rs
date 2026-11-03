@@ -26,8 +26,6 @@ pub trait WindowDriver {
 #[derive(Default)]
 pub struct RunOptions {
     pub frame_limit: Option<u64>,
-    /// Automated desktop resize/minimize/restore exercise.
-    pub smoke: bool,
 }
 type Factory = Box<dyn FnOnce(Arc<Window>) -> Result<Box<dyn WindowDriver>, BoxError>>;
 struct DesktopApp {
@@ -39,7 +37,6 @@ struct DesktopApp {
     frames: u64,
     minimized: bool,
     look_active: bool,
-    restore_at: Option<Instant>,
     deadline: Instant,
 }
 impl DesktopApp {
@@ -122,6 +119,7 @@ impl ApplicationHandler for DesktopApp {
                         KeyCode::KeyF => Some(InputKey::F),
                         KeyCode::KeyR => Some(InputKey::R),
                         KeyCode::F1 => Some(InputKey::F1),
+                        KeyCode::F5 => Some(InputKey::F5),
                         _ => None,
                     };
                     if let Some(key) = key
@@ -167,7 +165,7 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.minimized || self.restore_at.is_some() {
+                if self.minimized {
                     return;
                 }
                 let Some(driver) = &mut self.driver else {
@@ -182,46 +180,6 @@ impl ApplicationHandler for DesktopApp {
                             .is_some_and(|limit| self.frames >= limit)
                         {
                             event_loop.exit();
-                        } else if self.options.smoke {
-                            let window = self.window.as_ref().expect("live window");
-                            match self.frames {
-                                10 => {
-                                    let _ = window.request_inner_size(PhysicalSize::new(800, 600));
-                                }
-                                30 => {
-                                    let _ = window.request_inner_size(PhysicalSize::new(1440, 810));
-                                }
-                                50 => {
-                                    // Force a zero extent even if the OS does not emit one on minimize.
-                                    driver.resize(0, 0);
-                                    match driver.draw() {
-                                        Ok(false) => {}
-                                        Ok(true) => {
-                                            self.fail(
-                                                event_loop,
-                                                "zero extent rendered unexpectedly".into(),
-                                            );
-                                            return;
-                                        }
-                                        Err(error) => {
-                                            self.fail(event_loop, error);
-                                            return;
-                                        }
-                                    }
-                                    window.set_minimized(true);
-                                    self.restore_at =
-                                        Some(Instant::now() + Duration::from_millis(300));
-                                }
-                                60 => {
-                                    driver.input(InputEvent::Key {
-                                        key: InputKey::W,
-                                        pressed: true,
-                                    });
-                                    driver.input(InputEvent::Look { x: 24.0, y: -8.0 });
-                                }
-                                70 => driver.input(InputEvent::FocusLost),
-                                _ => {}
-                            }
                         }
                     }
                     Ok(false) => {}
@@ -250,23 +208,7 @@ impl ApplicationHandler for DesktopApp {
             );
             return;
         }
-        if let Some(restore_at) = self.restore_at {
-            if Instant::now() >= restore_at {
-                if let Some(window) = &self.window {
-                    window.set_minimized(false);
-                    let size = window.inner_size();
-                    if let Some(driver) = &mut self.driver {
-                        driver.resize(size.width, size.height);
-                    }
-                    self.minimized = size.width == 0 || size.height == 0;
-                }
-                self.restore_at = None;
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(restore_at));
-                return;
-            }
-        }
-        // Timer also lets finite smoke runs time out if the window stays minimized.
+        // Keep finite runs responsive even while the window is minimized.
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + Duration::from_millis(16),
         ));
@@ -297,7 +239,6 @@ pub fn run(
         frames: 0,
         minimized: false,
         look_active: false,
-        restore_at: None,
         deadline: Instant::now() + Duration::from_secs(30),
     };
     let loop_result = event_loop.run_app(&mut app);

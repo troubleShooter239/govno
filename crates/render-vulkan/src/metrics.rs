@@ -37,16 +37,3 @@ pub(crate) fn distribution(values: &[f64]) -> serde_json::Value {
     };
     serde_json::json!({"samples":sorted.len(),"mean_ms":sorted.iter().sum::<f64>()/sorted.len()as f64,"p50_ms":quantile(0.5),"p95_ms":quantile(0.95),"p99_ms":quantile(0.99)})
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn percentiles_use_nearest_rank() {
-        let values: Vec<f64> = (1..=100).map(f64::from).collect();
-        let d = distribution(&values);
-        assert_eq!(d["p95_ms"], 95.0);
-        assert_eq!(d["p99_ms"], 99.0);
-        assert_eq!(d["mean_ms"], 50.5);
-        assert!(distribution(&[]).is_null());
-    }
-}

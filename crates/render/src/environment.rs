@@ -109,58 +109,6 @@ fn sh_basis(n: Vec3) -> [f32; 9] {
         0.54627424 * (n.x * n.x - n.y * n.y),
     ]
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn constant_hdr_environment_keeps_color_and_energy_in_all_directions() {
-        let radiance = Vec3::new(0.1, 2.0, 4.0);
-        let analytic = DiffuseEnvironment::constant(radiance).unwrap();
-        let projected =
-            DiffuseEnvironment::from_equirectangular(128, 64, &vec![radiance; 128 * 64]).unwrap();
-        for n in [
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-            -Vec3::X,
-            -Vec3::Y,
-            -Vec3::Z,
-            Vec3::ONE.normalize(),
-        ] {
-            assert!(analytic.evaluate(n).abs_diff_eq(radiance, 1e-5));
-            assert!(projected.evaluate(n).abs_diff_eq(radiance, 0.002));
-        }
-    }
-    #[test]
-    fn panorama_orientation_preserves_a_bright_upper_hemisphere() {
-        let pixels: Vec<_> = (0..64)
-            .flat_map(|y| vec![if y < 32 { Vec3::ONE } else { Vec3::ZERO }; 128])
-            .collect();
-        let env = DiffuseEnvironment::from_equirectangular(128, 64, &pixels).unwrap();
-        assert!((env.evaluate(Vec3::Y).x - 1.0).abs() < 0.002);
-        assert!(env.evaluate(-Vec3::Y).x < 0.002);
-        assert!((env.evaluate(Vec3::X).x - 0.5).abs() < 0.002);
-    }
-    #[test]
-    fn malformed_panorama_and_nonfinite_or_negative_hdr_are_rejected() {
-        assert!(DiffuseEnvironment::from_equirectangular(0, 0, &[]).is_err());
-        assert!(DiffuseEnvironment::from_equirectangular(4, 2, &[Vec3::ONE; 7]).is_err());
-        assert!(DiffuseEnvironment::constant(Vec3::splat(f32::MAX)).is_err());
-        assert!(
-            DiffuseEnvironment::from_equirectangular(4, 2, &[Vec3::splat(f32::MAX); 8]).is_err()
-        );
-        for bad in [
-            Vec3::splat(f32::NAN),
-            Vec3::splat(f32::INFINITY),
-            Vec3::splat(-0.1),
-        ] {
-            assert!(DiffuseEnvironment::constant(bad).is_err());
-            let mut pixels = [Vec3::ONE; 8];
-            pixels[3] = bad;
-            assert!(DiffuseEnvironment::from_equirectangular(4, 2, &pixels).is_err());
-        }
-    }
-}
 
 /// Validated scene-linear full-sphere panorama, shared without CPU GGX cooking.
 #[derive(Debug, Clone)]

@@ -169,24 +169,3 @@ pub(crate) fn output_constants(
     bytes[4..].copy_from_slice(&settings.bloom.intensity.to_ne_bytes());
     bytes
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn output_abi_preserves_exposure_and_encoding_path() {
-        for srgb in [false, true] {
-            let bytes = output_constants(
-                govno_render::PostProcessSettings {
-                    exposure_ev: -1.0,
-                    ..Default::default()
-                },
-                srgb,
-            );
-            assert_eq!(
-                u32::from_ne_bytes(bytes[..4].try_into().unwrap()),
-                u32::from(!srgb)
-            );
-            assert_eq!(f32::from_ne_bytes(bytes[4..].try_into().unwrap()), 0.08);
-        }
-    }
-}

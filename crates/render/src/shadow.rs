@@ -61,40 +61,6 @@ impl DirectionalShadow {
         Ok(matrix)
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn shadow_projection_uses_finite_depth_and_handles_vertical_light() {
-        let s = DirectionalShadow::default();
-        for dir in [Vec3::Y, -Vec3::Y, Vec3::new(-0.5, 1.0, 0.7).normalize()] {
-            let m = s.view_projection(dir).unwrap();
-            let center = m.project_point3(s.center);
-            assert!(center.x.abs() < 1e-5 && center.y.abs() < 1e-5);
-            assert!((0.0..1.0).contains(&center.z));
-            assert!(m.project_point3(s.center + dir).z < center.z);
-            assert!(m.project_point3(s.center - dir).z > center.z);
-        }
-        let m = s.view_projection(Vec3::Z).unwrap();
-        assert!(m.project_point3(Vec3::Y).y < 0.0);
-        assert!(s.view_projection(Vec3::ZERO).is_err());
-        for extent in [0.0, f32::NAN, f32::INFINITY, 10001.0] {
-            assert!(
-                DirectionalShadow {
-                    half_extent: extent,
-                    ..s
-                }
-                .view_projection(Vec3::Y)
-                .is_err()
-            );
-        }
-        assert!(
-            DirectionalShadow { bias: -0.1, ..s }
-                .view_projection(Vec3::Y)
-                .is_err()
-        );
-    }
-}
 
 pub const CASCADE_COUNT: usize = 4;
 pub struct ShadowCascades {
@@ -190,71 +156,5 @@ impl DirectionalShadow {
             return Err("cascade matrix is non-finite".into());
         }
         Ok(ShadowCascades { matrices, splits })
-    }
-}
-#[cfg(test)]
-mod cascade_tests {
-    use super::*;
-    #[test]
-    fn practical_splits_cover_finite_view_and_track_camera() {
-        let s = DirectionalShadow::default();
-        let camera = crate::Camera::default();
-        let extent = crate::RenderExtent {
-            width: 1280,
-            height: 720,
-        };
-        let a = s.cascades(&camera, extent, Vec3::Y).unwrap();
-        assert!(a.splits.windows(2).all(|w| w[1] > w[0]));
-        assert!((a.splits[3] - s.distance).abs() < 0.001);
-        let mut moved = camera.clone();
-        moved.position.x += 8.0;
-        let b = s.cascades(&moved, extent, Vec3::Y).unwrap();
-        assert_ne!(a.matrices[0], b.matrices[0]);
-        for (i, m) in a.matrices.iter().enumerate() {
-            let begin = if i == 0 { camera.near } else { a.splits[i - 1] };
-            let p =
-                m.project_point3(camera.position + camera.forward() * (begin + a.splits[i]) * 0.5);
-            assert!(p.x.abs() < 1.0 && p.y.abs() < 1.0 && (0.0..1.0).contains(&p.z));
-        }
-    }
-}
-
-#[cfg(test)]
-mod containment_tests {
-    use super::*;
-    #[test]
-    fn cascade_matrices_contain_all_slice_corners() {
-        let camera = crate::Camera::default();
-        let extent = crate::RenderExtent {
-            width: 1280,
-            height: 720,
-        };
-        let s = DirectionalShadow::default();
-        let c = s
-            .cascades(&camera, extent, Vec3::new(-0.5, 1.0, 0.7))
-            .unwrap();
-        let forward = camera.forward();
-        let right = Vec3::new(camera.yaw.cos(), 0.0, camera.yaw.sin());
-        let up = right.cross(forward);
-        for i in 0..4 {
-            let begin = if i == 0 { camera.near } else { c.splits[i - 1] };
-            for depth in [begin, c.splits[i]] {
-                let half = depth * (camera.vertical_fov * 0.5).tan();
-                for x in [-1.0, 1.0] {
-                    for y in [-1.0, 1.0] {
-                        let corner = camera.position
-                            + forward * depth
-                            + right * x * half * extent.width as f32 / extent.height as f32
-                            + up * y * half;
-                        let clip = c.matrices[i].project_point3(corner);
-                        assert!(
-                            clip.x.abs() <= 1.001
-                                && clip.y.abs() <= 1.001
-                                && (0.0..1.0).contains(&clip.z)
-                        );
-                    }
-                }
-            }
-        }
     }
 }

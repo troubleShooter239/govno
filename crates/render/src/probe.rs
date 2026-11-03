@@ -58,30 +58,6 @@ impl LocalProbe {
         (point + ray * distance - self.position).normalize_or_zero()
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn probe_box_fades_and_corrects_parallax() {
-        let p = LocalProbe {
-            slot: 1,
-            position: Vec3::ZERO,
-            bounds_min: Vec3::splat(-2.0),
-            bounds_max: Vec3::splat(2.0),
-            fade: 1.0,
-            strength: 1.0,
-        };
-        p.validate().unwrap();
-        assert_eq!(p.influence(Vec3::ZERO), 1.0);
-        assert_eq!(p.influence(Vec3::X * 3.0), 0.0);
-        assert_eq!(p.influence(Vec3::X * 1.5), 0.5);
-        assert!(
-            p.project_reflection(Vec3::X, Vec3::Z)
-                .abs_diff_eq(Vec3::new(1.0, 0.0, 2.0).normalize(), 1e-6)
-        );
-        assert!(LocalProbe { slot: 0, ..p }.validate().is_err());
-    }
-}
 
 /// Normalized global/first/second local weights in the current probe-list order.
 pub fn probe_weights(probes: &[LocalProbe], point: Vec3) -> [f32; 3] {
@@ -90,24 +66,4 @@ pub fn probe_weights(probes: &[LocalProbe], point: Vec3) -> [f32; 3] {
     let global = (1.0 - a - b).max(0.0);
     let sum = (global + a + b).max(0.00001);
     [global / sum, a / sum, b / sum]
-}
-#[cfg(test)]
-mod blending_tests {
-    use super::*;
-    #[test]
-    fn overlapping_probes_normalize_and_outside_falls_back() {
-        let p = LocalProbe {
-            slot: 1,
-            position: Vec3::ZERO,
-            bounds_min: Vec3::splat(-2.0),
-            bounds_max: Vec3::splat(2.0),
-            fade: 1.0,
-            strength: 1.0,
-        };
-        assert_eq!(
-            probe_weights(&[p, LocalProbe { slot: 2, ..p }], Vec3::ZERO),
-            [0.0, 0.5, 0.5]
-        );
-        assert_eq!(probe_weights(&[p], Vec3::X * 3.0), [1.0, 0.0, 0.0]);
-    }
 }

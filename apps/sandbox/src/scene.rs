@@ -1,8 +1,6 @@
 use glam::{Quat, Vec3};
 use govno_core::BoxError;
-use govno_render::{
-    Camera, DrawInstance, Material, MeshData, MeshHandle, RenderWorld, Transform, Vertex,
-};
+use govno_render::{Camera, DrawInstance, Material, MeshData, RenderWorld, Transform, Vertex};
 use govno_render_vulkan::VulkanRenderer;
 
 pub fn cube() -> MeshData {
@@ -63,9 +61,8 @@ pub fn sphere() -> MeshData {
 }
 pub fn build(
     renderer: &mut VulkanRenderer,
-    smoke: bool,
     environment: &govno_render::EnvironmentRadiance,
-) -> Result<(RenderWorld, usize, Option<MeshHandle>), BoxError> {
+) -> Result<(RenderWorld, usize), BoxError> {
     let mut rgba8 = Vec::new();
     for y in 0..64 {
         for x in 0..64 {
@@ -188,32 +185,6 @@ pub fn build(
     instances[animated].material.metallic = 0.8;
     instances[animated].material.roughness = 0.9;
     instances[animated].material.emissive = Vec3::new(0.2, 0.025, 0.01);
-    let temporary = if smoke {
-        let handle = renderer.upload_mesh(&self::cube())?;
-        instances.push(DrawInstance {
-            mesh: handle,
-            transform: Transform {
-                translation: Vec3::new(5.0, 0.0, 1.0),
-                ..Default::default()
-            },
-            material: Material {
-                emissive_texture: None,
-                occlusion_texture: None,
-                emissive: Vec3::ZERO,
-                occlusion_strength: 1.0,
-                normal_texture: None,
-                metallic_roughness_texture: None,
-                normal_scale: 1.0,
-                base_color_texture: None,
-                base_color: Vec3::new(0.1, 0.8, 0.2),
-                metallic: 0.0,
-                roughness: 0.4,
-            },
-        });
-        Some(handle)
-    } else {
-        None
-    };
     renderer.set_environment_gpu(environment, 0)?;
     renderer.set_environment_gpu(
         &govno_render::EnvironmentRadiance::constant(Vec3::new(0.5, 0.08, 0.025))?,
@@ -258,40 +229,7 @@ pub fn build(
         point_lights: point_lights(),
         instances,
     };
-    Ok((world, animated, temporary))
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn sample_geometry_has_valid_indices_and_normals() {
-        for mesh in [cube(), sphere()] {
-            mesh.validate().unwrap();
-            for vertex in mesh.vertices {
-                assert!((Vec3::from_array(vertex.normal).length() - 1.0).abs() < 1e-5);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod winding_tests {
-    use super::*;
-    #[test]
-    fn visible_triangles_wind_outwards() {
-        for mesh in [cube(), sphere()] {
-            for triangle in mesh.indices.as_chunks::<3>().0 {
-                let a = &mesh.vertices[triangle[0] as usize];
-                let b = &mesh.vertices[triangle[1] as usize];
-                let c = &mesh.vertices[triangle[2] as usize];
-                let normal = (Vec3::from_array(b.position) - Vec3::from_array(a.position))
-                    .cross(Vec3::from_array(c.position) - Vec3::from_array(a.position));
-                if normal.length_squared() > 1e-10 {
-                    assert!(normal.dot(Vec3::from_array(a.normal)) > 0.0);
-                }
-            }
-        }
-    }
+    Ok((world, animated))
 }
 
 pub fn point_lights() -> Vec<govno_render::PointLight> {

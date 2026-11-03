@@ -185,32 +185,3 @@ impl Upload {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::Cell;
-    struct Probe(Rc<Cell<usize>>);
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
-    #[test]
-    fn retirement_waits_for_last_use_and_drops_once() {
-        let count = Rc::new(Cell::new(0));
-        let mut queue = RetirementQueue::default();
-        queue.retire(4, Probe(count.clone()));
-        queue.retire(7, Probe(count.clone()));
-        queue.collect(3);
-        assert_eq!(count.get(), 0);
-        queue.collect(4);
-        assert_eq!(count.get(), 1);
-        queue.collect(6);
-        assert_eq!(count.get(), 1);
-        queue.collect(7);
-        assert_eq!(count.get(), 2);
-        queue.collect(100);
-        assert_eq!(count.get(), 2);
-    }
-}

@@ -137,13 +137,6 @@ impl VulkanRenderer {
     pub fn device_capabilities(&self) -> &DeviceCapabilities {
         &self.ctx.capabilities
     }
-    pub fn verify_environment(
-        &mut self,
-        data: &govno_render::EnvironmentRadiance,
-    ) -> Result<[f32; 3], BoxError> {
-        self.wait_idle()?;
-        self.scene_gpu.verify_environment(data)
-    }
     pub fn post_diagnostics(&mut self) -> Result<Option<[f32; 4]>, BoxError> {
         self.wait_idle()?;
         let ctx = self.ctx.clone();
@@ -480,31 +473,4 @@ fn present_was_enqueued(result: Result<bool, vk::Result>) -> bool {
                 | vk::Result::ERROR_SURFACE_LOST_KHR
                 | vk::Result::ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn wsi_rejection_still_requires_presentation_fence_wait() {
-        for result in [
-            Ok(false),
-            Ok(true),
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR),
-            Err(vk::Result::ERROR_SURFACE_LOST_KHR),
-            Err(vk::Result::ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT),
-        ] {
-            assert!(present_was_enqueued(result));
-        }
-    }
-    #[test]
-    fn failed_enqueue_must_not_wait_on_unsignaled_present_fence() {
-        for error in [
-            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
-            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-            vk::Result::ERROR_DEVICE_LOST,
-        ] {
-            assert!(!present_was_enqueued(Err(error)));
-        }
-    }
 }

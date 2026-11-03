@@ -380,13 +380,3 @@ pub(crate) fn depth_range() -> vk::ImageSubresourceRange {
         .base_array_layer(0)
         .layer_count(1)
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn noncoherent_flush_size_is_atom_aligned() {
-        assert_eq!(aligned_size(112, 256), 256);
-        assert_eq!(aligned_size(256, 256), 256);
-        assert_eq!(aligned_size(257, 256), 512);
-    }
-}

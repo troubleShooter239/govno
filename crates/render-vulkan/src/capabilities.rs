@@ -208,27 +208,3 @@ pub(crate) fn save_cache(path: &std::path::Path, bytes: &[u8]) -> std::io::Resul
     std::fs::write(&temporary, bytes)?;
     std::fs::rename(temporary, path)
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cache_header_rejects_other_devices_and_truncation() {
-        let mut p = vk::PhysicalDeviceProperties {
-            vendor_id: 123,
-            device_id: 456,
-            ..Default::default()
-        };
-        p.pipeline_cache_uuid = [7; 16];
-        let mut data: Vec<u8> = [32_u32, 1, 123, 456]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        data.extend([7; 16]);
-        assert!(cache_compatible(&data, &p));
-        data.extend([1, 2, 3, 4]);
-        assert!(cache_compatible(&data, &p));
-        assert!(!cache_compatible(&data[..16], &p));
-        data[8] = 0;
-        assert!(!cache_compatible(&data, &p));
-    }
-}

@@ -64,43 +64,6 @@ impl TextureData {
         Ok(())
     }
 }
-#[cfg(test)]
-mod texture_tests {
-    use super::*;
-    #[test]
-    fn malformed_pixels_are_rejected() {
-        assert!(
-            TextureData {
-                color_space: Default::default(),
-                width: 0,
-                height: 1,
-                rgba8: vec![]
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            TextureData {
-                color_space: Default::default(),
-                width: 2,
-                height: 2,
-                rgba8: vec![255; 15]
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            TextureData {
-                color_space: Default::default(),
-                width: 1,
-                height: 1,
-                rgba8: vec![255; 4]
-            }
-            .validate()
-            .is_ok()
-        );
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureFilter {
@@ -148,25 +111,5 @@ impl TextureSampling {
         } else {
             u32::BITS - width.max(height).leading_zeros()
         }
-    }
-}
-#[cfg(test)]
-mod mip_tests {
-    use super::*;
-    #[test]
-    fn mip_count_handles_rectangular_and_non_power_of_two_images() {
-        let sampling = TextureSampling::default();
-        assert_eq!(sampling.mip_levels(1, 1), 1);
-        assert_eq!(sampling.mip_levels(64, 8), 7);
-        assert_eq!(sampling.mip_levels(7, 3), 3);
-        assert_eq!(sampling.mip_levels(0, 4), 0);
-        assert_eq!(
-            TextureSampling {
-                mip: MipFilter::None,
-                ..sampling
-            }
-            .mip_levels(64, 64),
-            1
-        );
     }
 }

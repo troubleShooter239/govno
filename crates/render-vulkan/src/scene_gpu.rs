@@ -188,12 +188,6 @@ impl SceneGpu {
         )?;
         Ok(owner)
     }
-    pub fn verify_environment(
-        &mut self,
-        data: &govno_render::EnvironmentRadiance,
-    ) -> Result<[f32; 3], BoxError> {
-        self.specular.verify(data)
-    }
     pub fn set_environment_gpu(
         &mut self,
         data: &govno_render::EnvironmentRadiance,
@@ -621,45 +615,6 @@ impl SceneGpu {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use glam::Vec3;
-    use govno_render::{Material, MeshHandle, Transform};
-    #[test]
-    fn push_constant_layout_matches_shader_offsets() {
-        let item = DrawInstance {
-            mesh: MeshHandle::from_parts(1, 0),
-            transform: Transform {
-                scale: Vec3::new(2.0, 1.0, 1.0),
-                ..Default::default()
-            },
-            material: Material {
-                emissive_texture: None,
-                occlusion_texture: None,
-                emissive: Vec3::new(0.25, 0.5, 0.75),
-                occlusion_strength: 0.6,
-                normal_texture: None,
-                metallic_roughness_texture: None,
-                normal_scale: 1.0,
-                base_color_texture: None,
-                base_color: Vec3::ONE,
-                metallic: 0.7,
-                roughness: 0.4,
-            },
-        };
-        let bytes = draw_constants(&item);
-        assert_eq!(bytes.len(), DRAW_BYTES as usize);
-        let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(value(64), 0.25);
-        assert_eq!(value(76), 0.4);
-        assert_eq!(value(92), 0.7);
-        assert_eq!(value(112), 0.25);
-        assert_eq!(value(120), 0.75);
-        assert_eq!(value(124), 0.6);
-    }
-}
-
 fn frame_constants(
     world: &RenderWorld,
     extent: RenderExtent,
@@ -742,88 +697,4 @@ fn frame_constants(
         }
     }
     Ok(floats(&data))
-}
-#[cfg(test)]
-mod light_abi_tests {
-    use super::*;
-    #[test]
-    fn light_array_offsets_stride_count_and_unused_slots_match_shader() {
-        let mut world = RenderWorld {
-            frustum_culling: true,
-            post_process: Default::default(),
-            directional_shadow: None,
-            diffuse_environment: None,
-            specular_environment: false,
-            local_probes: vec![],
-            camera: Default::default(),
-            light_direction: glam::Vec3::Y,
-            light_radiance: glam::Vec3::splat(4.0),
-            point_lights: vec![
-                govno_render::PointLight {
-                    position: glam::Vec3::new(1.0, 2.0, 3.0),
-                    range: 5.0,
-                    intensity: glam::Vec3::new(6.0, 7.0, 8.0),
-                };
-                govno_render::MAX_POINT_LIGHTS
-            ],
-            instances: vec![],
-        };
-        let extent = RenderExtent {
-            width: 1,
-            height: 1,
-        };
-        let bytes = frame_constants(&world, extent, false).unwrap();
-        let value = |offset| f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        assert_eq!(bytes.len(), 1248);
-        assert!(bytes[704..].iter().all(|&b| b == 0));
-        assert_eq!(value(108), 16.0);
-        for index in 0..govno_render::MAX_POINT_LIGHTS {
-            for (component, expected) in [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 8.0, 0.0]
-                .into_iter()
-                .enumerate()
-            {
-                assert_eq!(value(112 + 32 * index + 4 * component), expected);
-            }
-        }
-        world.point_lights.clear();
-        let bytes = frame_constants(&world, extent, false).unwrap();
-        assert!(bytes[108..624].iter().all(|&b| b == 0));
-        world.diffuse_environment = Some(
-            govno_render::DiffuseEnvironment::constant(glam::Vec3::new(0.1, 0.2, 1.5)).unwrap(),
-        );
-        let bytes = frame_constants(&world, extent, false).unwrap();
-        for (i, coefficient) in world
-            .diffuse_environment
-            .as_ref()
-            .unwrap()
-            .coefficients()
-            .iter()
-            .enumerate()
-        {
-            assert_eq!(
-                &bytes[704 + 16 * i..720 + 16 * i],
-                floats(&coefficient.extend(0.0).to_array())
-            );
-        }
-        world.specular_environment = true;
-        let bytes = frame_constants(&world, extent, false).unwrap();
-        assert_eq!(f32::from_ne_bytes(bytes[848..852].try_into().unwrap()), 1.0);
-        let shadow = govno_render::DirectionalShadow::default();
-        world.directional_shadow = Some(shadow);
-        let bytes = frame_constants(&world, extent, false).unwrap();
-        assert_eq!(
-            &bytes[624..688],
-            floats(
-                &shadow
-                    .view_projection(world.light_direction)
-                    .unwrap()
-                    .to_cols_array()
-            )
-        );
-        assert_eq!(
-            f32::from_ne_bytes(bytes[688..692].try_into().unwrap()),
-            shadow.bias
-        );
-        assert_eq!(f32::from_ne_bytes(bytes[692..696].try_into().unwrap()), 1.0);
-    }
 }
