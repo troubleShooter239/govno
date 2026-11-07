@@ -2,8 +2,8 @@
 use glam::Vec3;
 use govno_core::BoxError;
 
-/// Current basic Forward renderer contract; clustered lighting is a later stage.
-pub const MAX_POINT_LIGHTS: usize = 16;
+/// Maximum point lights per RenderWorld, shared with the Forward+ storage ABI.
+pub const MAX_POINT_LIGHTS: usize = 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct PointLight {
     pub position: Vec3,

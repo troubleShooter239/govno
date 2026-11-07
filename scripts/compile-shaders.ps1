@@ -5,12 +5,12 @@ try {
     # Build both stages in scratch, validate, then replace the checked-in binaries.
     $outputDirectory = 'target/shaders'
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-    foreach ($entry in @('vertexMain', 'fragmentMain', 'postVertex', 'postFragment', 'shadowVertex', 'meterExposure', 'bloomExtract', 'bloomBlur', 'prefilterIBL', 'integrateBRDF', 'projectSH', 'vertexMainBindless', 'fragmentMainBindless', 'cullScene')) {
+    foreach ($entry in @('vertexMain', 'fragmentMain', 'postVertex', 'postFragment', 'shadowVertex', 'meterExposure', 'bloomExtract', 'bloomBlur', 'prefilterIBL', 'integrateBRDF', 'projectSH', 'vertexMainBindless', 'fragmentMainBindless', 'cullScene', 'cullLights')) {
         [string[]]$defines = @()
         if ($entry.EndsWith('Bindless')) { $defines = @('-DGOVNO_BINDLESS=1') }
         $shaderEntry = $entry -replace 'Bindless$',''
         $outputPath = Join-Path $outputDirectory "$entry.spv"
-        $source = if ($shaderEntry -eq 'cullScene') { 'cull.slang' } elseif ($shaderEntry -in @('prefilterIBL','integrateBRDF','projectSH')) { 'ibl.slang' } elseif ($shaderEntry -in @('meterExposure','bloomExtract','bloomBlur')) { 'effects.slang' } elseif ($shaderEntry -eq 'shadowVertex') { 'shadow.slang' } elseif ($shaderEntry.StartsWith('post')) { 'post.slang' } else { 'forward.slang' }
+        $source = if ($shaderEntry -eq 'cullLights') { 'light-cull.slang' } elseif ($shaderEntry -eq 'cullScene') { 'cull.slang' } elseif ($shaderEntry -in @('prefilterIBL','integrateBRDF','projectSH')) { 'ibl.slang' } elseif ($shaderEntry -in @('meterExposure','bloomExtract','bloomBlur')) { 'effects.slang' } elseif ($shaderEntry -eq 'shadowVertex') { 'shadow.slang' } elseif ($shaderEntry.StartsWith('post')) { 'post.slang' } else { 'forward.slang' }
         slangc "$shaderDirectory/$source" -entry $shaderEntry @defines -target spirv -profile spirv_1_6 -matrix-layout-column-major -fvk-use-entrypoint-name -reflection-json (Join-Path $outputDirectory "$entry.reflection.json") -o $outputPath
         if ($LASTEXITCODE -ne 0) { throw "Slang compilation failed for $entry" }
         $reflectionPath=Join-Path $outputDirectory "$entry.reflection.json"
@@ -23,7 +23,7 @@ try {
         spirv-val --target-env vulkan1.4 $outputPath
         if ($LASTEXITCODE -ne 0) { throw "SPIR-V validation failed for $entry" }
     }
-    foreach ($entry in @('vertexMain', 'fragmentMain', 'postVertex', 'postFragment', 'shadowVertex', 'meterExposure', 'bloomExtract', 'bloomBlur', 'prefilterIBL', 'integrateBRDF', 'projectSH', 'vertexMainBindless', 'fragmentMainBindless', 'cullScene')) {
+    foreach ($entry in @('vertexMain', 'fragmentMain', 'postVertex', 'postFragment', 'shadowVertex', 'meterExposure', 'bloomExtract', 'bloomBlur', 'prefilterIBL', 'integrateBRDF', 'projectSH', 'vertexMainBindless', 'fragmentMainBindless', 'cullScene', 'cullLights')) {
         Copy-Item -LiteralPath (Join-Path $outputDirectory "$entry.reflection.json") -Destination (Join-Path $shaderDirectory "$entry.reflection.json") -Force
         Copy-Item -LiteralPath (Join-Path $outputDirectory "$entry.spv") -Destination (Join-Path $shaderDirectory "$entry.spv") -Force
     }

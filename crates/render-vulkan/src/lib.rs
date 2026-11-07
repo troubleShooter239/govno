@@ -9,6 +9,7 @@ mod context;
 mod effects;
 mod frame;
 mod graph;
+mod lighting;
 mod memory;
 mod mesh;
 mod metrics;
@@ -47,6 +48,8 @@ pub struct RendererOptions {
     pub bindless: bool,
     pub gpu_culling: bool,
     pub verify_culling: bool,
+    pub forward_plus: bool,
+    pub verify_lighting: bool,
 }
 impl Default for RendererOptions {
     fn default() -> Self {
@@ -55,6 +58,8 @@ impl Default for RendererOptions {
             bindless: true,
             gpu_culling: true,
             verify_culling: false,
+            forward_plus: true,
+            verify_lighting: false,
         }
     }
 }
@@ -91,6 +96,9 @@ impl VulkanRenderer {
         options: RendererOptions,
         stats: Arc<ValidationStats>,
     ) -> Result<Self, BoxError> {
+        if options.verify_lighting && !options.forward_plus {
+            return Err("lighting verification requires Forward+".into());
+        }
         let ctx = context::create_device(window, options, stats)?;
         let memory = Memory::new(ctx.clone())?;
         let culling = if ctx.gpu_culling {
@@ -169,7 +177,7 @@ impl VulkanRenderer {
         let cpu = &self.measurements.cpu[warmup.min(self.measurements.cpu.len())..];
         let gpu = &self.measurements.gpu[warmup.min(self.measurements.gpu.len())..];
         let profile = &self.ctx.capabilities;
-        let report = serde_json::json!({"schema":1,"render_graph":self.swapchain.as_ref().map(|s|s.graph.report()),"transient_images":self.transient_images.report(),"gpu_scene":self.scene_gpu.report(),"gpu_culling":self.culling.as_ref().map(|c|c.report()),"gpu":profile.name,"vendor_id":profile.vendor_id,"device_id":profile.device_id,"api_version":profile.api_version,"driver_version":profile.driver_version,"profiles":{"modern":profile.modern,"advanced":profile.advanced,"ray_tracing":profile.ray_tracing},"warmup_frames":warmup,"presented_samples":self.measurements.cpu.len(),"gpu_samples":self.measurements.gpu.len(),"cpu_draw_api":metrics::distribution(cpu),"cpu_command_record":metrics::distribution(&self.measurements.record[warmup.min(self.measurements.record.len())..]),"gpu_frame":metrics::distribution(&gpu.iter().map(|v|v[0]).collect::<Vec<_>>()),"gpu_cull":metrics::distribution(&gpu.iter().map(|v|v[4]).collect::<Vec<_>>()),"gpu_shadow":metrics::distribution(&gpu.iter().map(|v|v[1]).collect::<Vec<_>>()),"gpu_forward":metrics::distribution(&gpu.iter().map(|v|v[2]).collect::<Vec<_>>()),"gpu_post":metrics::distribution(&gpu.iter().map(|v|v[3]).collect::<Vec<_>>()),"draws":{"indirect_calls":self.measurements.indirect_calls,"forward_descriptor_binds":self.measurements.descriptor_binds,"main":self.measurements.submitted,"culled":self.measurements.culled,"shadow":self.measurements.shadow},"memory":self.memory.report(),"pipeline_creation":{"count":self.ctx.pipeline_builds.load(Ordering::Relaxed),"total_ms":self.ctx.pipeline_build_ns.load(Ordering::Relaxed)as f64*1e-6,"cache_loaded_bytes":self.ctx.pipeline_cache_loaded_bytes},"timeline":{"submitted":self.submitted,"completed":self.completed},"notes":"CPU = draw API wall time incl acquire/waits/submit/present, includes validation/material preparation; excludes app/event-loop work. GPU = timestamped command buffer, excludes presentation. Memory allocator counters exclude driver/WSI; optional EXT_memory_budget provides driver heap estimates. CPU command-record excludes waits and app validation. Profiles report hardware support. GPU culling counters cover submitted command buffers, including WSI-rejected presents."});
+        let report = serde_json::json!({"schema":1,"render_graph":self.swapchain.as_ref().map(|s|s.graph.report()),"transient_images":self.transient_images.report(),"gpu_scene":self.scene_gpu.report(),"gpu_culling":self.culling.as_ref().map(|c|c.report()),"gpu":profile.name,"vendor_id":profile.vendor_id,"device_id":profile.device_id,"api_version":profile.api_version,"driver_version":profile.driver_version,"profiles":{"modern":profile.modern,"advanced":profile.advanced,"ray_tracing":profile.ray_tracing},"warmup_frames":warmup,"presented_samples":self.measurements.cpu.len(),"gpu_samples":self.measurements.gpu.len(),"cpu_draw_api":metrics::distribution(cpu),"cpu_command_record":metrics::distribution(&self.measurements.record[warmup.min(self.measurements.record.len())..]),"gpu_frame":metrics::distribution(&gpu.iter().map(|v|v[0]).collect::<Vec<_>>()),"gpu_cull":metrics::distribution(&gpu.iter().map(|v|v[4]).collect::<Vec<_>>()),"gpu_light_cull":metrics::distribution(&gpu.iter().map(|v|v[5]).collect::<Vec<_>>()),"gpu_shadow":metrics::distribution(&gpu.iter().map(|v|v[1]).collect::<Vec<_>>()),"gpu_forward":metrics::distribution(&gpu.iter().map(|v|v[2]).collect::<Vec<_>>()),"gpu_post":metrics::distribution(&gpu.iter().map(|v|v[3]).collect::<Vec<_>>()),"draws":{"indirect_calls":self.measurements.indirect_calls,"forward_descriptor_binds":self.measurements.descriptor_binds,"main":self.measurements.submitted,"culled":self.measurements.culled,"shadow":self.measurements.shadow},"memory":self.memory.report(),"pipeline_creation":{"count":self.ctx.pipeline_builds.load(Ordering::Relaxed),"total_ms":self.ctx.pipeline_build_ns.load(Ordering::Relaxed)as f64*1e-6,"cache_loaded_bytes":self.ctx.pipeline_cache_loaded_bytes},"timeline":{"submitted":self.submitted,"completed":self.completed},"notes":"CPU = draw API wall time incl acquire/waits/submit/present, includes validation/material preparation; excludes app/event-loop work. GPU = timestamped command buffer, excludes presentation. Memory allocator counters exclude driver/WSI; optional EXT_memory_budget provides driver heap estimates. CPU command-record excludes waits and app validation. Profiles report hardware support. GPU culling counters cover submitted command buffers, including WSI-rejected presents."});
         Ok(serde_json::to_string_pretty(&report)?)
     }
     pub fn device_capabilities(&self) -> &DeviceCapabilities {
@@ -403,6 +411,7 @@ impl VulkanRenderer {
             self.completed = self.timeline.completed()?;
             self.retired.collect(self.completed);
             self.scene_gpu.collect_descriptors(self.completed);
+            self.scene_gpu.lighting.collect(self.completed)?;
             self.scene_gpu.update(
                 self.frame_index,
                 world,
@@ -496,6 +505,9 @@ impl VulkanRenderer {
             )?;
             self.submitted = next_serial;
             frame.serial = self.submitted;
+            self.scene_gpu
+                .lighting
+                .submitted(self.frame_index, self.submitted);
             if let Some(culling) = &mut self.culling {
                 culling.submitted(self.frame_index, self.submitted, self.measurements.enabled);
                 if let Some((visible, culled)) = gpu_counts {
@@ -547,6 +559,7 @@ impl VulkanRenderer {
         self.completed = self.timeline.completed()?;
         self.retired.collect(self.completed);
         self.scene_gpu.collect_descriptors(self.completed);
+        self.scene_gpu.lighting.collect(self.completed)?;
         if let Some(culling) = &mut self.culling {
             culling.collect(self.completed, &mut self.measurements)?;
         }

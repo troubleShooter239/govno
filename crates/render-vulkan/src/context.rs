@@ -91,6 +91,8 @@ impl Drop for SurfaceContext {
 pub(crate) struct DeviceContext {
     pub bindless: bool,
     pub gpu_culling: bool,
+    pub forward_plus: bool,
+    pub verify_lighting: bool,
     surface: Arc<SurfaceContext>,
     pub device: ash::Device,
     pub swapchain: ash::khr::swapchain::Device,
@@ -376,7 +378,7 @@ pub(crate) fn create_device(
                 );
             }
             if !bindless && !capabilities.legacy_materials {
-                tracing::warn!(%name,"GPU rejected: legacy material layouts require 8 storage-buffer descriptors");
+                tracing::warn!(%name,"GPU rejected: legacy material layouts require 12 storage-buffer descriptors");
                 continue;
             }
             let priorities = [1.0];
@@ -429,6 +431,8 @@ pub(crate) fn create_device(
             let mut owner = DeviceContext {
                 bindless,
                 gpu_culling,
+                forward_plus: options.forward_plus,
+                verify_lighting: options.verify_lighting,
                 surface,
                 device,
                 physical,

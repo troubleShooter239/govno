@@ -1,12 +1,11 @@
 struct LocalProbeData{float4 positionSlot;float4 minimumFade;float4 maximumStrength;};
-struct PointLightData { float4 positionRange; float4 intensity; };
+#include "lighting.slang"
 struct FrameData
 {
     column_major float4x4 viewProjection;
     float4 cameraPosition;
     float4 lightDirection;
     float4 lightRadiance; // rgb directional radiance; w point light count
-    PointLightData pointLights[16];
     column_major float4x4 shadowViewProjection;
     float4 shadowParams; // x receiver bias, y enabled
     float4 diffuseSH[9]; // cosine-convolved irradiance/pi
@@ -200,16 +199,27 @@ float4 fragmentMain(VertexOutput input) : SV_Target0
     float metal = saturate(draw.baseColorMetallic.w * mr.y);
     float roughness = clamp(draw.inverseScaleSquaredRoughness.w * mr.x,0.045,1.0);
     float3 color = directLight(n,v,l,base,metal,roughness,frame.lightRadiance.xyz) * directionalVisibility(input.worldPosition);
-    for (uint i = 0; i < uint(frame.lightRadiance.w); ++i) {
-        PointLightData light = frame.pointLights[i];
-        float3 delta = light.positionRange.xyz - input.worldPosition;
+    uint lightCount=uint(frame.lightRadiance.w);
+    uint2 tile=uint2(input.position.xy)/16;
+    uint tileIndex=tile.y*lighting[0]+tile.x;
+    for (uint word=0;word<(lightCount+31)/32;++word) {
+        uint mask=lighting[3]!=0 ? lighting[MASK_OFFSET+tileIndex*MASK_WORDS+word] : 0xffffffff;
+        while (mask!=0) {
+        uint bit=uint(firstbitlow(mask)); mask &= mask-1;
+        uint i=word*32+bit;
+        if (i>=lightCount) break;
+        float4 positionRange=lightVector(i,0);
+        float3 intensity=lightVector(i,1).rgb;
+        float3 delta = positionRange.xyz - input.worldPosition;
         float distanceSquared = dot(delta,delta);
+        if (distanceSquared >= positionRange.w*positionRange.w) continue;
         float distance = sqrt(distanceSquared);
         // Squared quartic window reaches zero smoothly at the finite range.
-        float ratio = distance / light.positionRange.w;
+        float ratio = distance / positionRange.w;
         float window = saturate(1.0 - ratio*ratio*ratio*ratio);
         float attenuation = window * window / max(distanceSquared,0.01);
-        color += directLight(n,v,safeNormalize(delta),base,metal,roughness,light.intensity.rgb * attenuation);
+        color += directLight(n,v,safeNormalize(delta),base,metal,roughness,intensity * attenuation);
+    }
     }
     // Diffuse-only IBL. Directional shadows affect direct light only.
     float ao = lerp(1.0, sampleMaterial(draw,4,input.uv).r, draw.emissiveOcclusion.w);

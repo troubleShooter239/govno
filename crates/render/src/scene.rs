@@ -183,7 +183,7 @@ impl RenderWorld {
             return Err("invalid directional light".into());
         }
         if self.point_lights.len() > crate::MAX_POINT_LIGHTS {
-            return Err("too many point lights for the basic Forward renderer (maximum 16)".into());
+            return Err("too many point lights (maximum 1024)".into());
         }
         for light in &self.point_lights {
             light.validate()?;

@@ -40,7 +40,7 @@ impl Frame {
             frame.query_pool = frame.ctx.device.create_query_pool(
                 &vk::QueryPoolCreateInfo::default()
                     .query_type(vk::QueryType::TIMESTAMP)
-                    .query_count(5),
+                    .query_count(6),
                 None,
             )?;
             frame.pool = frame.ctx.device.create_command_pool(
@@ -65,12 +65,12 @@ impl Frame {
         self.timing_enabled = true;
     }
     /// Call after the slot's timeline serial completed, before resetting queries.
-    pub fn timing(&mut self) -> Result<Option<[f64; 5]>, BoxError> {
+    pub fn timing(&mut self) -> Result<Option<[f64; 6]>, BoxError> {
         if !self.timing_enabled || self.serial == 0 || self.serial == self.measured_serial {
             return Ok(None);
         }
-        let mut values = [0_u64; 5];
-        // SAFETY: caller waited for this slot's submission, and all five queries were written.
+        let mut values = [0_u64; 6];
+        // SAFETY: caller waited for this slot's submission, and all six queries were written.
         unsafe {
             self.ctx.device.get_query_pool_results(
                 self.query_pool,
@@ -92,9 +92,10 @@ impl Frame {
         Ok(Some([
             interval(0, 4),
             interval(1, 2),
-            interval(2, 3),
+            interval(5, 3),
             interval(3, 4),
             interval(0, 1),
+            interval(2, 5),
         ]))
     }
     pub fn record(
@@ -134,7 +135,7 @@ impl Frame {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
             if self.timing_enabled {
-                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 5);
+                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 6);
             }
             if self.timing_enabled {
                 device.cmd_write_timestamp2(
@@ -179,6 +180,7 @@ impl Frame {
                 handle: effects.exposure.handle,
                 size: 16,
             };
+            bindings[Resource::Lighting as usize] = scene.lighting.binding(frame_index);
             bindings[Resource::Objects as usize] = scene.objects_binding(frame_index);
             if let Some(culling) = culling {
                 let [input, commands, counts, readback] = culling.bindings(frame_index);
@@ -190,6 +192,18 @@ impl Frame {
             for pass in &chain.graph.plan.passes {
                 crate::graph::barriers(&self.ctx, self.command, pass, &bindings);
                 match pass.tag {
+                    crate::graph::Pass::HostLighting => {}
+                    crate::graph::Pass::LightCull => {
+                        scene.lighting.record(self.command, frame_index);
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                5,
+                            );
+                        }
+                    }
                     crate::graph::Pass::ResetCull => culling
                         .ok_or("missing culling resources")?
                         .reset(self.command, frame_index),
@@ -229,6 +243,14 @@ impl Frame {
                                 self.query_pool,
                                 2,
                             );
+                            if !self.ctx.forward_plus {
+                                device.cmd_write_timestamp2(
+                                    self.command,
+                                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                    self.query_pool,
+                                    5,
+                                );
+                            }
                         }
                     }
                     crate::graph::Pass::Forward => {

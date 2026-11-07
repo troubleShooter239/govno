@@ -12,6 +12,8 @@ pub(crate) struct ResourceState {
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pass {
+    LightCull,
+    HostLighting,
     ResetCull,
     Cull,
     ReadbackCull,
@@ -37,8 +39,9 @@ pub(crate) enum Resource {
     Commands,
     Counts,
     Readback,
+    Lighting,
 }
-pub(crate) const RESOURCE_COUNT: usize = 12;
+pub(crate) const RESOURCE_COUNT: usize = 13;
 pub(crate) struct FrameGraph {
     pub plan: CompiledGraph<ResourceState, Pass>,
     pub lifetimes: [Option<Lifetime>; RESOURCE_COUNT],
@@ -46,12 +49,16 @@ pub(crate) struct FrameGraph {
 impl FrameGraph {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"passes":self.plan.passes.iter().map(|p|p.name.as_str()).collect::<Vec<_>>(),
-            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects","cull_input","indirect_commands","draw_counts","draw_readback"]
+            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects","cull_input","indirect_commands","draw_counts","draw_readback","lighting"]
                 .into_iter().zip(&self.lifetimes).map(|(name,lifetime)|
                 serde_json::json!({"name":name,"first":lifetime.map(|l|l.first),"last":lifetime.map(|l|l.last)})).collect::<Vec<_>>())})
     }
 }
-pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
+pub(crate) fn compile(
+    gpu_culling: bool,
+    forward_plus: bool,
+    verify_lighting: bool,
+) -> Result<FrameGraph, BoxError> {
     use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
     let state = |stages, access, layout| ResourceState {
         stages,
@@ -133,6 +140,11 @@ pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
         state(S::HOST, A::HOST_READ, L::UNDEFINED),
         true,
     );
+    let lighting = graph.resource(
+        "Forward+ lights and tile masks",
+        state(S::HOST, A::HOST_WRITE, L::UNDEFINED),
+        true,
+    );
     let compute_read = state(S::COMPUTE_SHADER, A::SHADER_STORAGE_READ, L::UNDEFINED);
     let indirect_read = state(S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ, L::UNDEFINED);
     let usage = |resource, state, access| Use {
@@ -165,7 +177,7 @@ pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
             ],
         );
     }
-    graph.pass(
+    let shadow_pass = graph.pass(
         "Cascaded shadow atlas",
         Pass::Shadow,
         vec![
@@ -181,7 +193,20 @@ pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
             ),
         ],
     );
+    if forward_plus {
+        let light_pass = graph.pass(
+            "Forward+ light culling",
+            Pass::LightCull,
+            vec![usage(lighting, exposure_write, Access::ReadWrite)],
+        );
+        graph.after(light_pass, shadow_pass)?;
+    }
     let mut forward_uses = vec![
+        usage(
+            lighting,
+            state(S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ, L::UNDEFINED),
+            Access::Read,
+        ),
         usage(hdr, color, Access::Write),
         usage(depth_image, depth, Access::Write),
         usage(shadow, shadow_read, Access::Read),
@@ -272,6 +297,17 @@ pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
             )],
         );
     }
+    if verify_lighting {
+        graph.pass(
+            "Verify Forward+ masks",
+            Pass::HostLighting,
+            vec![usage(
+                lighting,
+                state(S::HOST, A::HOST_READ, L::UNDEFINED),
+                Access::Read,
+            )],
+        );
+    }
     graph.pass(
         "Present",
         Pass::Present,
@@ -290,6 +326,7 @@ pub(crate) fn compile(gpu_culling: bool) -> Result<FrameGraph, BoxError> {
         commands,
         counts,
         readback,
+        lighting,
     ];
     let plan = graph.compile()?;
     let lifetimes = resources.map(|r| plan.lifetime(r));

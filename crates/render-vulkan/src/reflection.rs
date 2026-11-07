@@ -20,7 +20,8 @@ fn document(entry: &str) -> Result<&'static str, BoxError> {
         "projectSH",
         "vertexMainBindless",
         "fragmentMainBindless",
-        "cullScene"
+        "cullScene",
+        "cullLights"
     )
 }
 fn number(v: &Value, key: &str) -> Result<u32, BoxError> {
@@ -122,7 +123,7 @@ pub(crate) fn compute(
                 .as_str()
                 .ok_or("missing compute resource name")?;
             let expected = match name {
-                "source" | "panorama" | "cullInput" => 0,
+                "source" | "panorama" | "cullInput" | "lighting" => 0,
                 "exposureState" | "panoramaSampler" | "objects" => 1,
                 "target" | "atlas" | "drawCommands" => 2,
                 "lut" | "drawCounts" => 3,
@@ -131,6 +132,9 @@ pub(crate) fn compute(
             };
             if number(&parameter["binding"], "index")? != expected {
                 return Err("reflected compute resource binding changed".into());
+            }
+            if name == "lighting" && uniform_size(&parameter["type"]["resultType"])? != 4 {
+                return Err("lighting storage word stride mismatch".into());
             }
             if entry == c"cullScene" {
                 let ty = &parameter["type"]["resultType"];
@@ -254,7 +258,7 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr, bindless: bool) -> Result<(), 
                 0 => vk::DescriptorType::UNIFORM_BUFFER,
                 1 | 3 | 5 | 6 | 8 => vk::DescriptorType::SAMPLED_IMAGE,
                 2 | 4 | 7 => vk::DescriptorType::SAMPLER,
-                9 | 10 => vk::DescriptorType::STORAGE_BUFFER,
+                9..=11 => vk::DescriptorType::STORAGE_BUFFER,
                 _ => return Err("graphics binding mismatch".into()),
             }
         };
@@ -266,6 +270,9 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr, bindless: bool) -> Result<(), 
         .as_array()
         .ok_or("missing shader parameters")?
     {
+        if parameter["name"] == "lighting" && uniform_size(&parameter["type"]["resultType"])? != 4 {
+            return Err("lighting storage word stride mismatch".into());
+        }
         if parameter["name"] == "objects" {
             let ty = &parameter["type"]["resultType"];
             if uniform_size(ty)? as u64 != crate::scene_gpu::OBJECT_BYTES {
@@ -310,6 +317,7 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr, bindless: bool) -> Result<(), 
                 "frame" => (0, 0),
                 "environmentSH" => (0, 9),
                 "objects" => (0, 10),
+                "lighting" => (0, 11),
                 "textureTable" => (1, 0),
                 "samplerTable" => (1, 1),
                 "specularAtlas" => (0, 6),
@@ -349,15 +357,14 @@ pub(crate) fn graphics(code: &[u8], entry: &CStr, bindless: bool) -> Result<(), 
                 ("cameraPosition", 64, 0),
                 ("lightDirection", 80, 0),
                 ("lightRadiance", 96, 0),
-                ("pointLights", 112, 32),
-                ("shadowViewProjection", 624, 0),
-                ("shadowParams", 688, 0),
-                ("diffuseSH", 704, 16),
-                ("environmentParams", 848, 0),
-                ("cascadeMatrices", 864, 64),
-                ("cascadeSplits", 1120, 0),
-                ("cascadeParams", 1136, 0),
-                ("localProbes", 1152, 48),
+                ("shadowViewProjection", 112, 0),
+                ("shadowParams", 176, 0),
+                ("diffuseSH", 192, 16),
+                ("environmentParams", 336, 0),
+                ("cascadeMatrices", 352, 64),
+                ("cascadeSplits", 608, 0),
+                ("cascadeParams", 624, 0),
+                ("localProbes", 640, 48),
             ] {
                 let field = t["fields"]
                     .as_array()

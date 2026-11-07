@@ -8,11 +8,11 @@ use govno_render::{DrawInstance, RenderExtent, RenderWorld};
 use gpu_allocator::MemoryLocation;
 use std::{rc::Rc, sync::Arc};
 
-pub(crate) const CAMERA_BYTES: u64 =
-    112 + 32 * govno_render::MAX_POINT_LIGHTS as u64 + 80 + 144 + 16 + 288 + 96;
+pub(crate) const CAMERA_BYTES: u64 = 112 + 80 + 144 + 16 + 288 + 96;
 const OBJECT_PARAMETERS_BYTES: usize = 128;
 pub(crate) const OBJECT_BYTES: u64 = 160;
 pub(crate) struct SceneGpu {
+    pub lighting: crate::lighting::Lighting,
     bindless: Option<crate::bindless::Bindless>,
     shadow: Option<crate::shadow::ShadowMap>,
     specular: crate::specular::SpecularGpu,
@@ -41,6 +41,7 @@ pub(crate) struct SceneGpu {
 impl SceneGpu {
     pub fn new(memory: Rc<Memory>, frames: u32) -> Result<Self, BoxError> {
         let mut owner = Self {
+            lighting: crate::lighting::Lighting::new(memory.clone(), frames)?,
             bindless: if memory.ctx.bindless {
                 Some(crate::bindless::Bindless::new(memory.ctx.clone(), frames)?)
             } else {
@@ -80,6 +81,11 @@ impl SceneGpu {
             )?);
         }
         let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(11)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(10)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -146,7 +152,7 @@ impl SceneGpu {
             let sizes = [
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(frames * 2),
+                    .descriptor_count(frames * 3),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(frames),
@@ -284,6 +290,9 @@ impl SceneGpu {
     ) -> Result<(), BoxError> {
         self.cameras[frame].write(&frame_constants(world, extent, self.loaded_probes[0])?)?;
         self.update_objects(frame, world)?;
+        if self.lighting.update(frame, world, extent)? {
+            self.bind_objects(frame);
+        }
         if let Some(table) = &mut self.bindless {
             table.update(
                 frame,
@@ -297,6 +306,7 @@ impl SceneGpu {
     }
     fn bind_objects(&self, frame: usize) {
         let bind = |set| {
+            self.lighting.bind(set, 11, frame);
             let info = [vk::DescriptorBufferInfo::default()
                 .buffer(self.objects[frame].handle)
                 .range(self.object_capacities[frame] as u64 * OBJECT_BYTES)];
@@ -381,7 +391,7 @@ impl SceneGpu {
     }
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"object_stride":OBJECT_BYTES,"frame_objects":self.object_counts,"frame_capacities":self.object_capacities,
-            "bindless":self.bindless.as_ref().map(|t|t.report())})
+            "lighting":self.lighting.report(),"bindless":self.bindless.as_ref().map(|t|t.report())})
     }
     pub fn shadow(&self) -> &crate::shadow::ShadowMap {
         self.shadow.as_ref().expect("shadow initialized")
@@ -509,7 +519,7 @@ impl SceneGpu {
             .map(|ty| {
                 vk::DescriptorPoolSize::default().ty(ty).descriptor_count(
                     if ty == vk::DescriptorType::STORAGE_BUFFER {
-                        frames * 2
+                        frames * 3
                     } else if ty == vk::DescriptorType::UNIFORM_BUFFER {
                         frames
                     } else if ty == vk::DescriptorType::SAMPLED_IMAGE {
@@ -532,6 +542,7 @@ impl SceneGpu {
                     .set_layouts(&layouts),
             )?;
             for (frame, (set, camera)) in slot.sets.iter().zip(&self.cameras).enumerate() {
+                self.lighting.bind(*set, 11, frame);
                 let objects = [vk::DescriptorBufferInfo::default()
                     .buffer(self.objects[frame].handle)
                     .range(self.object_capacities[frame] as u64 * OBJECT_BYTES)];
@@ -761,7 +772,7 @@ impl SceneGpu {
                 let sizes = [
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(frames * 2),
+                        .descriptor_count(frames * 3),
                     vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::UNIFORM_BUFFER)
                         .descriptor_count(frames),
@@ -833,11 +844,7 @@ fn frame_constants(
             .extend(world.point_lights.len() as f32)
             .to_array(),
     );
-    for light in &world.point_lights {
-        data.extend_from_slice(&light.position.extend(light.range).to_array());
-        data.extend_from_slice(&light.intensity.extend(0.0).to_array());
-    }
-    data.resize((112 + 32 * govno_render::MAX_POINT_LIGHTS) / 4, 0.0);
+
     let matrix = match world.directional_shadow {
         Some(shadow) => shadow.view_projection(world.light_direction)?,
         None => glam::Mat4::IDENTITY,

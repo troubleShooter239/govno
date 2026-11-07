@@ -25,6 +25,7 @@ pub struct DeviceCapabilities {
     pub gpu_culling: bool,
     pub max_draw_indirect_count: u32,
     pub max_compute_groups: u32,
+    pub max_compute_groups_y: u32,
     pub buffer_device_address: bool,
     pub max_push_constants: u32,
     pub max_image_dimension: u32,
@@ -108,7 +109,7 @@ pub(crate) fn probe(
         let l = properties.limits;
         let limits = l.max_push_constants_size >= 128
             && l.max_bound_descriptor_sets >= 4
-            && l.max_uniform_buffer_range >= 1248
+            && l.max_uniform_buffer_range >= 736
             && l.max_image_dimension2_d >= 4096
             && l.max_per_stage_descriptor_storage_buffers >= 4
             && l.max_per_stage_descriptor_sampled_images >= 20
@@ -129,7 +130,7 @@ pub(crate) fn probe(
             .min(l.max_per_stage_descriptor_samplers.saturating_sub(3))
             .min(l.max_descriptor_set_sampled_images.saturating_sub(5))
             .min(l.max_descriptor_set_samplers.saturating_sub(3))
-            .min(l.max_per_stage_resources.saturating_sub(11) / 2);
+            .min(l.max_per_stage_resources.saturating_sub(12) / 2);
         let bindless_capacity = if v12.runtime_descriptor_array != 0
             && v12.descriptor_binding_partially_bound != 0
             && v12.shader_sampled_image_array_non_uniform_indexing != 0
@@ -164,12 +165,13 @@ pub(crate) fn probe(
             timeline_semaphore: v12.timeline_semaphore != 0,
             descriptor_indexing: indexing,
             bindless_capacity,
-            legacy_materials: l.max_per_stage_descriptor_storage_buffers >= 8
-                && l.max_descriptor_set_storage_buffers >= 8,
+            legacy_materials: l.max_per_stage_descriptor_storage_buffers >= 12
+                && l.max_descriptor_set_storage_buffers >= 12,
             max_storage_buffer_range: l.max_storage_buffer_range,
             gpu_culling: indirect && v12.draw_indirect_count != 0,
             max_draw_indirect_count: l.max_draw_indirect_count,
             max_compute_groups: l.max_compute_work_group_count[0],
+            max_compute_groups_y: l.max_compute_work_group_count[1],
             buffer_device_address: v12.buffer_device_address != 0,
             max_push_constants: l.max_push_constants_size,
             max_image_dimension: l.max_image_dimension2_d,
