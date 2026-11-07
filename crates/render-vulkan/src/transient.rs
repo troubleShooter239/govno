@@ -59,7 +59,7 @@ impl ImagePool {
         self.acquire(ImageDescriptor {
             extent,
             format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             range: depth_range(),
         })
     }

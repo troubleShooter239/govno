@@ -12,6 +12,11 @@ pub(crate) struct ResourceState {
 }
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pass {
+    DepthPrepass,
+    HiZ,
+    ResetOcclusion,
+    Occlusion,
+    HostHiZ,
     LightCull,
     HostLighting,
     ResetCull,
@@ -40,8 +45,9 @@ pub(crate) enum Resource {
     Counts,
     Readback,
     Lighting,
+    Hierarchy,
 }
-pub(crate) const RESOURCE_COUNT: usize = 13;
+pub(crate) const RESOURCE_COUNT: usize = 14;
 pub(crate) struct FrameGraph {
     pub plan: CompiledGraph<ResourceState, Pass>,
     pub lifetimes: [Option<Lifetime>; RESOURCE_COUNT],
@@ -49,7 +55,7 @@ pub(crate) struct FrameGraph {
 impl FrameGraph {
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({"passes":self.plan.passes.iter().map(|p|p.name.as_str()).collect::<Vec<_>>(),
-            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects","cull_input","indirect_commands","draw_counts","draw_readback","lighting"]
+            "resources":(["hdr","depth","swapchain","shadow","bloom","scratch","exposure","objects","cull_input","indirect_commands","draw_counts","draw_readback","lighting","hierarchy"]
                 .into_iter().zip(&self.lifetimes).map(|(name,lifetime)|
                 serde_json::json!({"name":name,"first":lifetime.map(|l|l.first),"last":lifetime.map(|l|l.last)})).collect::<Vec<_>>())})
     }
@@ -58,6 +64,8 @@ pub(crate) fn compile(
     gpu_culling: bool,
     forward_plus: bool,
     verify_lighting: bool,
+    hiz: bool,
+    verify_hiz: bool,
 ) -> Result<FrameGraph, BoxError> {
     use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
     let state = |stages, access, layout| ResourceState {
@@ -145,6 +153,7 @@ pub(crate) fn compile(
         state(S::HOST, A::HOST_WRITE, L::UNDEFINED),
         true,
     );
+    let hierarchy = graph.resource("Hi-Z depth pyramid", undefined, false);
     let compute_read = state(S::COMPUTE_SHADER, A::SHADER_STORAGE_READ, L::UNDEFINED);
     let indirect_read = state(S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ, L::UNDEFINED);
     let usage = |resource, state, access| Use {
@@ -168,6 +177,76 @@ pub(crate) fn compile(
             vec![
                 usage(input, compute_read, Access::Read),
                 usage(objects, compute_read, Access::Read),
+                usage(
+                    commands,
+                    state(S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, L::UNDEFINED),
+                    Access::Write,
+                ),
+                usage(counts, exposure_write, Access::ReadWrite),
+            ],
+        );
+    }
+    if hiz {
+        graph.pass(
+            "Depth prepass",
+            Pass::DepthPrepass,
+            vec![
+                usage(depth_image, depth, Access::Write),
+                usage(
+                    objects,
+                    state(S::VERTEX_SHADER, A::SHADER_STORAGE_READ, L::UNDEFINED),
+                    Access::Read,
+                ),
+                usage(commands, indirect_read, Access::Read),
+                usage(counts, indirect_read, Access::Read),
+            ],
+        );
+        graph.pass(
+            "Build Hi-Z",
+            Pass::HiZ,
+            vec![
+                usage(
+                    depth_image,
+                    state(
+                        S::COMPUTE_SHADER,
+                        A::SHADER_SAMPLED_READ,
+                        L::DEPTH_READ_ONLY_OPTIMAL,
+                    ),
+                    Access::Read,
+                ),
+                usage(
+                    hierarchy,
+                    state(S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, L::UNDEFINED),
+                    Access::Write,
+                ),
+                usage(
+                    counts,
+                    state(S::TRANSFER, A::TRANSFER_READ, L::UNDEFINED),
+                    Access::Read,
+                ),
+                usage(
+                    readback,
+                    state(S::TRANSFER, A::TRANSFER_WRITE, L::UNDEFINED),
+                    Access::Write,
+                ),
+            ],
+        );
+        graph.pass(
+            "Reset occlusion counts",
+            Pass::ResetOcclusion,
+            vec![usage(
+                counts,
+                state(S::TRANSFER, A::TRANSFER_WRITE, L::UNDEFINED),
+                Access::Write,
+            )],
+        );
+        graph.pass(
+            "Hi-Z occlusion culling",
+            Pass::Occlusion,
+            vec![
+                usage(input, compute_read, Access::Read),
+                usage(objects, compute_read, Access::Read),
+                usage(hierarchy, compute_read, Access::Read),
                 usage(
                     commands,
                     state(S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE, L::UNDEFINED),
@@ -297,6 +376,17 @@ pub(crate) fn compile(
             )],
         );
     }
+    if verify_hiz {
+        graph.pass(
+            "Hi-Z host verification",
+            Pass::HostHiZ,
+            vec![usage(
+                hierarchy,
+                state(S::HOST, A::HOST_READ, L::UNDEFINED),
+                Access::Read,
+            )],
+        );
+    }
     if verify_lighting {
         graph.pass(
             "Verify Forward+ masks",
@@ -327,6 +417,7 @@ pub(crate) fn compile(
         counts,
         readback,
         lighting,
+        hierarchy,
     ];
     let plan = graph.compile()?;
     let lifetimes = resources.map(|r| plan.lifetime(r));

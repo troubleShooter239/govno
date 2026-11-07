@@ -8,6 +8,7 @@ enum Pass {
     Forward,
     Post,
     Shadow,
+    Depth,
 }
 pub(crate) struct ForwardPipeline {
     ctx: Arc<DeviceContext>,
@@ -81,6 +82,19 @@ impl ForwardPipeline {
             Pass::Shadow,
         )
     }
+    pub fn depth(
+        ctx: Arc<DeviceContext>,
+        layout: vk::DescriptorSetLayout,
+    ) -> Result<Self, BoxError> {
+        Self::build(
+            ctx,
+            vk::Format::UNDEFINED,
+            vk::Format::D32_SFLOAT,
+            layout,
+            None,
+            Pass::Depth,
+        )
+    }
     fn build(
         ctx: Arc<DeviceContext>,
         format: vk::Format,
@@ -91,7 +105,7 @@ impl ForwardPipeline {
     ) -> Result<Self, BoxError> {
         let pipeline_started = std::time::Instant::now();
         let post = pass == Pass::Post;
-        let shadow = pass == Pass::Shadow;
+        let shadow = matches!(pass, Pass::Shadow | Pass::Depth);
         let bindless = texture_layout.is_some() && !post && !shadow;
         let vertex = ShaderModule::new(
             ctx.clone(),
@@ -205,7 +219,7 @@ impl ForwardPipeline {
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(!post)
             .depth_write_enable(!post)
-            .depth_compare_op(if shadow {
+            .depth_compare_op(if pass == Pass::Shadow {
                 vk::CompareOp::LESS
             } else {
                 vk::CompareOp::GREATER
@@ -220,7 +234,7 @@ impl ForwardPipeline {
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0)
-            .depth_bias_enable(shadow)
+            .depth_bias_enable(pass == Pass::Shadow)
             .depth_bias_constant_factor(1.25)
             .depth_bias_slope_factor(1.75);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()

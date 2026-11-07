@@ -7,6 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DrawCounts {
     pub indirect_calls: u32,
+    pub depth_prepass_calls: u32,
     pub descriptor_binds: u32,
     // With GPU culling, visibility counts describe the latest completed frame.
     pub submitted: u32,
@@ -40,7 +41,7 @@ impl Frame {
             frame.query_pool = frame.ctx.device.create_query_pool(
                 &vk::QueryPoolCreateInfo::default()
                     .query_type(vk::QueryType::TIMESTAMP)
-                    .query_count(6),
+                    .query_count(8),
                 None,
             )?;
             frame.pool = frame.ctx.device.create_command_pool(
@@ -65,12 +66,12 @@ impl Frame {
         self.timing_enabled = true;
     }
     /// Call after the slot's timeline serial completed, before resetting queries.
-    pub fn timing(&mut self) -> Result<Option<[f64; 6]>, BoxError> {
+    pub fn timing(&mut self) -> Result<Option<[f64; 7]>, BoxError> {
         if !self.timing_enabled || self.serial == 0 || self.serial == self.measured_serial {
             return Ok(None);
         }
-        let mut values = [0_u64; 6];
-        // SAFETY: caller waited for this slot's submission, and all six queries were written.
+        let mut values = [0_u64; 8];
+        // SAFETY: caller waited for this slot's submission, and all eight queries were written.
         unsafe {
             self.ctx.device.get_query_pool_results(
                 self.query_pool,
@@ -89,13 +90,15 @@ impl Frame {
         let interval =
             |a: usize, b: usize| ((values[b].wrapping_sub(values[a])) & mask) as f64 * scale;
         self.measured_serial = self.serial;
+        let hiz_time = if self.ctx.hiz { interval(6, 7) } else { 0.0 };
         Ok(Some([
             interval(0, 4),
-            interval(1, 2),
+            (interval(1, 2) - hiz_time).max(0.0),
             interval(5, 3),
             interval(3, 4),
             interval(0, 1),
             interval(2, 5),
+            hiz_time,
         ]))
     }
     pub fn record(
@@ -135,7 +138,7 @@ impl Frame {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
             if self.timing_enabled {
-                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 6);
+                device.cmd_reset_query_pool(self.command, self.query_pool, 0, 8);
             }
             if self.timing_enabled {
                 device.cmd_write_timestamp2(
@@ -151,6 +154,20 @@ impl Frame {
                     vk::PipelineStageFlags2::TOP_OF_PIPE,
                     self.query_pool,
                     1,
+                );
+            }
+            if self.timing_enabled && !self.ctx.hiz {
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    self.query_pool,
+                    6,
+                );
+                device.cmd_write_timestamp2(
+                    self.command,
+                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    self.query_pool,
+                    7,
                 );
             }
             let effects = chain.post.effects.as_ref().ok_or("post effects missing")?;
@@ -180,6 +197,9 @@ impl Frame {
                 handle: effects.exposure.handle,
                 size: 16,
             };
+            if let Some(hiz) = culling.and_then(|c| c.hiz.as_ref()) {
+                bindings[Resource::Hierarchy as usize] = hiz.binding(frame_index);
+            }
             bindings[Resource::Lighting as usize] = scene.lighting.binding(frame_index);
             bindings[Resource::Objects as usize] = scene.objects_binding(frame_index);
             if let Some(culling) = culling {
@@ -192,6 +212,76 @@ impl Frame {
             for pass in &chain.graph.plan.passes {
                 crate::graph::barriers(&self.ctx, self.command, pass, &bindings);
                 match pass.tag {
+                    crate::graph::Pass::HostHiZ => {}
+                    crate::graph::Pass::DepthPrepass => {
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                6,
+                            );
+                        }
+                        counts.depth_prepass_calls = culling
+                            .ok_or("missing depth culling")?
+                            .batches(frame_index)
+                            .len() as u32;
+                        let attachment = vk::RenderingAttachmentInfo::default()
+                            .image_view(depth.view)
+                            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                            .load_op(vk::AttachmentLoadOp::CLEAR)
+                            .store_op(vk::AttachmentStoreOp::STORE)
+                            .clear_value(vk::ClearValue {
+                                depth_stencil: vk::ClearDepthStencilValue {
+                                    depth: 0.0,
+                                    stencil: 0,
+                                },
+                            });
+                        device.cmd_begin_rendering(
+                            self.command,
+                            &vk::RenderingInfo::default()
+                                .render_area(vk::Rect2D {
+                                    offset: vk::Offset2D::default(),
+                                    extent,
+                                })
+                                .layer_count(1)
+                                .depth_attachment(&attachment),
+                        );
+                        culling.ok_or("missing depth culling")?.depth_prepass(
+                            self.command,
+                            frame_index,
+                            extent,
+                            scene.sets[frame_index],
+                            meshes,
+                        )?;
+                        device.cmd_end_rendering(self.command);
+                    }
+                    crate::graph::Pass::HiZ => {
+                        let c = culling.ok_or("missing Hi-Z culling")?;
+                        c.copy_candidates(self.command, frame_index);
+                        c.hiz
+                            .as_ref()
+                            .ok_or("missing Hi-Z")?
+                            .record(self.command, frame_index);
+                    }
+                    crate::graph::Pass::ResetOcclusion => culling
+                        .ok_or("missing occlusion resources")?
+                        .reset(self.command, frame_index),
+                    crate::graph::Pass::Occlusion => {
+                        culling.ok_or("missing occlusion resources")?.dispatch(
+                            self.command,
+                            frame_index,
+                            true,
+                        );
+                        if self.timing_enabled {
+                            device.cmd_write_timestamp2(
+                                self.command,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                self.query_pool,
+                                7,
+                            );
+                        }
+                    }
                     crate::graph::Pass::HostLighting => {}
                     crate::graph::Pass::LightCull => {
                         scene.lighting.record(self.command, frame_index);
@@ -208,9 +298,11 @@ impl Frame {
                         .ok_or("missing culling resources")?
                         .reset(self.command, frame_index),
                     crate::graph::Pass::Cull => {
-                        culling
-                            .ok_or("missing culling resources")?
-                            .dispatch(self.command, frame_index);
+                        culling.ok_or("missing culling resources")?.dispatch(
+                            self.command,
+                            frame_index,
+                            false,
+                        );
                         if self.timing_enabled {
                             device.cmd_write_timestamp2(
                                 self.command,

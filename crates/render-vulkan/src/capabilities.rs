@@ -111,7 +111,8 @@ pub(crate) fn probe(
             && l.max_bound_descriptor_sets >= 4
             && l.max_uniform_buffer_range >= 736
             && l.max_image_dimension2_d >= 4096
-            && l.max_per_stage_descriptor_storage_buffers >= 4
+            && l.max_per_stage_descriptor_storage_buffers >= 5
+            && l.max_descriptor_set_storage_buffers >= 5
             && l.max_per_stage_descriptor_sampled_images >= 20
             && l.max_per_stage_descriptor_samplers >= 12;
         let modern = properties.api_version >= vk::make_api_version(0, 1, 4, 0)

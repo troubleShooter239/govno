@@ -88,6 +88,7 @@ fn main() -> Result<(), BoxError> {
     let mut verify_culling = false;
     let mut forward_plus = true;
     let mut verify_lighting = false;
+    let mut hiz = false;
     let mut gltf_path = None;
     let mut scene_path = None;
     let mut environment_path = None;
@@ -187,9 +188,11 @@ fn main() -> Result<(), BoxError> {
             "--verify-culling" => verify_culling = true,
             "--no-forward-plus" => forward_plus = false,
             "--verify-lighting" => verify_lighting = true,
+            "--hiz" => hiz = true,
+            "--no-hiz" => hiz = false,
             "--help" => {
                 println!(
-                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation] [--no-bindless] [--no-gpu-culling] [--verify-culling] [--no-forward-plus] [--verify-lighting]"
+                    "govno-sandbox [--scene PATH | --gltf PATH] [--environment PATH] [--exposure EV] [--no-shadows] [--no-environment] [--no-specular] [--benchmark PATH] [--benchmark-warmup N] [--culling-stress N] [--no-culling] [--frames N] [--probe-left PATH] [--probe-right PATH] [--no-local-probes] [--debug-cascades] [--no-bloom] [--bloom-strength N] [--bloom-threshold N] [--emission N] [--no-auto-exposure] [--validation|--no-validation] [--no-bindless] [--no-gpu-culling] [--verify-culling] [--no-forward-plus] [--verify-lighting] [--hiz|--no-hiz]"
                 );
                 return Ok(());
             }
@@ -257,6 +260,7 @@ fn main() -> Result<(), BoxError> {
                     verify_culling,
                     forward_plus,
                     verify_lighting,
+                    hiz,
                 },
                 callback_stats,
             )?;

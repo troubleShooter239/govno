@@ -21,7 +21,8 @@ fn document(entry: &str) -> Result<&'static str, BoxError> {
         "vertexMainBindless",
         "fragmentMainBindless",
         "cullScene",
-        "cullLights"
+        "cullLights",
+        "reduceDepth"
     )
 }
 fn number(v: &Value, key: &str) -> Result<u32, BoxError> {
@@ -125,9 +126,9 @@ pub(crate) fn compute(
             let expected = match name {
                 "source" | "panorama" | "cullInput" | "lighting" => 0,
                 "exposureState" | "panoramaSampler" | "objects" => 1,
-                "target" | "atlas" | "drawCommands" => 2,
+                "target" | "atlas" | "drawCommands" | "pyramid" => 2,
                 "lut" | "drawCounts" => 3,
-                "sh" => 4,
+                "sh" | "hierarchy" => 4,
                 _ => return Err("unknown compute resource role".into()),
             };
             if number(&parameter["binding"], "index")? != expected {
@@ -135,6 +136,12 @@ pub(crate) fn compute(
             }
             if name == "lighting" && uniform_size(&parameter["type"]["resultType"])? != 4 {
                 return Err("lighting storage word stride mismatch".into());
+            }
+            if name == "hierarchy" {
+                if uniform_size(&parameter["type"]["resultType"])? != 4 {
+                    return Err("Hi-Z storage stride mismatch".into());
+                }
+                continue;
             }
             if entry == c"cullScene" {
                 let ty = &parameter["type"]["resultType"];
@@ -174,7 +181,14 @@ pub(crate) fn compute(
             }
         }
         if parameter["binding"]["kind"] == "pushConstantBuffer" {
-            if push == 80 {
+            if push == 96 {
+                fields(
+                    parameter,
+                    &[("viewProjection", 0), ("options", 64), ("screen", 80)],
+                )?;
+            } else if push == 32 {
+                fields(parameter, &[("sourceInfo", 0), ("targetInfo", 16)])?;
+            } else if push == 80 {
                 fields(parameter, &[("viewProjection", 0), ("options", 64)])?;
             } else if push == 48 {
                 fields(parameter, &[("exposure", 0), ("bloom", 16), ("timing", 32)])?;
